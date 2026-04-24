@@ -120,7 +120,7 @@ def build(args: argparse.Namespace) -> pathlib.Path:
     build_dir.mkdir(parents=True)
 
     for item in PACKAGE_DIR.iterdir():
-        if item.name in {".env.example", "skill-manifest.template.json"}:
+        if item.name in {".env.example", "skill-manifest.template.json", "tests"}:
             continue
         target = build_dir / item.name
         if item.is_dir():
