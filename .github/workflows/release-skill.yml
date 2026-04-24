@@ -1,0 +1,53 @@
+name: Release Skill
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: "Package version, for example 2026.04.24-r1"
+        required: true
+        type: string
+      skill_id:
+        description: "Skill id"
+        required: true
+        default: "pagepop-skill"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate public repository safety
+        run: bash scripts/check-public-safety.sh
+
+      - name: Build production package
+        id: build
+        env:
+          PAGEPOP_PACKAGE_VERSION: ${{ inputs.package_version }}
+          PAGEPOP_SKILL_CHANNEL: prod
+          PAGEPOP_SKILL_ID: ${{ inputs.skill_id }}
+          PAGEPOP_RELEASE_REPO: ${{ github.repository }}
+          PAGEPOP_RELEASE_TAG: ${{ inputs.skill_id }}-v${{ inputs.package_version }}
+          PAGEPOP_BUILD_SHA: ${{ github.sha }}
+        run: |
+          python3 scripts/build-skill.py
+          echo "release_tag=${PAGEPOP_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "zip_path=dist/${PAGEPOP_SKILL_ID}-prod-${PAGEPOP_PACKAGE_VERSION}.zip" >> "$GITHUB_OUTPUT"
+          echo "sha_path=dist/${PAGEPOP_SKILL_ID}-prod-${PAGEPOP_PACKAGE_VERSION}.zip.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.build.outputs.release_tag }}" \
+            "${{ steps.build.outputs.zip_path }}" \
+            "${{ steps.build.outputs.sha_path }}" \
+            --title "${{ steps.build.outputs.release_tag }}" \
+            --notes "Production PagePop skill release."
