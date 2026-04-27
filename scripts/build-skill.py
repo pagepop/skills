@@ -19,6 +19,8 @@ PACKAGE_DIR = ROOT / "packages" / "pagepop-skill"
 DIST_DIR = ROOT / "dist"
 MANIFEST_TEMPLATE = PACKAGE_DIR / "skill-manifest.template.json"
 VERSION_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}-r\d+$")
+ALLOWED_PAGEPOP_HOSTS = {"pagepop.cn", "www.pagepop.cn", "pc-api.pagepop.cn"}
+PAGEPOP_HOST_RE = re.compile(r"\b(?:[a-z0-9-]+\.)*pagepop\.cn\b", re.IGNORECASE)
 
 
 def read_env_file(path: pathlib.Path) -> dict[str, str]:
@@ -75,10 +77,8 @@ def sha256_file(path: pathlib.Path) -> str:
 
 def ensure_public_safe(path: pathlib.Path) -> None:
     forbidden = [
-        re.compile(r"t-[a-z0-9.-]*pagepop\.cn", re.IGNORECASE),
-        re.compile(r"gitlab\.epian1\.com", re.IGNORECASE),
-        re.compile(r"pagepop-login-token", re.IGNORECASE),
-        re.compile(r"/tmp/[a-z0-9._-]*token", re.IGNORECASE),
+        ("internal Git service hostname", re.compile(r"gitlab\.[a-z0-9.-]+", re.IGNORECASE)),
+        ("local token path", re.compile(r"/tmp/[a-z0-9._-]*token", re.IGNORECASE)),
     ]
     for file_path in path.rglob("*"):
         if not file_path.is_file():
@@ -86,9 +86,12 @@ def ensure_public_safe(path: pathlib.Path) -> None:
         if file_path.suffix in {".zip", ".gz"}:
             continue
         text = file_path.read_text(encoding="utf-8", errors="ignore")
-        for pattern in forbidden:
+        for host in PAGEPOP_HOST_RE.findall(text):
+            if host.lower() not in ALLOWED_PAGEPOP_HOSTS:
+                raise SystemExit(f"public safety check failed in build output: non-allowlisted PagePop hostname in {file_path}")
+        for label, pattern in forbidden:
             if pattern.search(text):
-                raise SystemExit(f"public safety check failed in build output: {file_path}: {pattern.pattern}")
+                raise SystemExit(f"public safety check failed in build output: {label} in {file_path}")
 
 
 def build(args: argparse.Namespace) -> pathlib.Path:

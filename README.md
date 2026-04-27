@@ -17,6 +17,7 @@ This repository is public. Do not commit non-production environment values, priv
 
 - [Architecture](docs/architecture.md)
 - [Environment Isolation](docs/environments.md)
+- [Dev Builds](docs/dev-builds.md)
 - [Release Process](docs/release.md)
 - [GitHub Setup](docs/github-setup.md)
 
