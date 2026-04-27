@@ -67,6 +67,7 @@ Artifact delivery events include:
 - `target.preferred_channel`: normalized from `source_app` when the host passes launch context.
 
 Hosts should prefer their matching `channel_presentations` entry, then fall back to `presentation.fallback_text`.
+Feishu hosts should avoid rendering raw URLs from generic `presentation`; use the Feishu card buttons or Feishu-specific fallback text so underscores in URLs are not truncated by lark_md auto-linking.
 
 ## Output
 

@@ -656,13 +656,13 @@ class PagepopSkillTests(unittest.TestCase):
                 "page_count": 5,
                 "urls": [
                     "https://example.com/slide-1.png",
-                    "https://example.com/export.pdf",
+                    "https://example.com/export_file.pdf",
                 ],
                 "ready": True,
             },
             api_base_url="https://pc-api.pagepop.cn",
             latest_text_message="",
-            suggestions=["Make it more executive friendly"],
+            suggestions=["Use https://example.com/a_b as reference"],
             source_app="slack",
         )
 
@@ -688,6 +688,25 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(feishu["card"]["header"]["title"]["content"], 'Generated "Launch Plan"')
         self.assertEqual(feishu["media"]["preview_image_urls"], ["https://example.com/slide-1.png"])
         self.assertTrue(feishu["media"]["image_upload_required"])
+        feishu_buttons = [
+            action
+            for element in feishu["card"]["elements"]
+            if element.get("tag") == "action"
+            for action in element["actions"]
+        ]
+        self.assertEqual(feishu_buttons[1]["url"], "https://example.com/export%5Ffile.pdf")
+        feishu_text = "\n".join(
+            element["text"]["content"]
+            for element in feishu["card"]["elements"]
+            if element.get("tag") == "div"
+        )
+        self.assertIn("https://example.com/a%5Fb", feishu_text)
+
+    def test_feishu_safe_text_urls_encodes_underscores_in_bare_urls(self) -> None:
+        self.assertEqual(
+            client.feishu_safe_text_urls("Open https://example.com/a_b?x=y_z now"),
+            "Open https://example.com/a%5Fb?x=y%5Fz now",
+        )
 
     def test_unwrap_base_response_success(self) -> None:
         raw = json.dumps({"code": 1000, "data": {"conversation_id": "conv-1"}}).encode("utf-8")

@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 import typing as t
@@ -27,6 +28,7 @@ DEFAULT_POLL_TIMEOUT_SECONDS = 600
 DEFAULT_STREAM_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_STREAM_RECONNECTS = 5
 HEARTBEAT_PROGRESS_INTERVAL_SECONDS = 15
+URL_TEXT_RE = re.compile(r"https?://[^\s<>()\"']+")
 
 SUCCESS_CODE = 1000
 STATE_FILE_NAME = "state.json"
@@ -904,6 +906,16 @@ def slack_escape(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def feishu_safe_url(value: str) -> str:
+    # Feishu lark_md auto-linking may stop at underscores in bare URLs.
+    # Percent-encoding keeps the target equivalent while avoiding that tokenizer edge.
+    return value.strip().replace("_", "%5F")
+
+
+def feishu_safe_text_urls(value: str) -> str:
+    return URL_TEXT_RE.sub(lambda match: feishu_safe_url(match.group(0)), value)
+
+
 def build_slack_blocks(presentation: dict[str, t.Any]) -> list[dict[str, t.Any]]:
     headline = str(presentation.get("headline", "")).strip()
     subtitle = str(presentation.get("subtitle", "")).strip()
@@ -986,13 +998,13 @@ def build_feishu_card(presentation: dict[str, t.Any]) -> dict[str, t.Any]:
     if subtitle:
         text_parts.append(f"**{subtitle}**")
     if summary:
-        text_parts.append(summary)
+        text_parts.append(feishu_safe_text_urls(summary))
 
     elements: list[dict[str, t.Any]] = []
     if text_parts:
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n\n".join(text_parts)}})
     if actions:
-        next_steps = "\n".join(f"- {truncate_plain_text(item, 220)}" for item in actions[:3])
+        next_steps = "\n".join(f"- {feishu_safe_text_urls(truncate_plain_text(item, 220))}" for item in actions[:3])
         elements.append({"tag": "hr"})
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**可以继续调整：**\n{next_steps}"}})
 
@@ -1003,7 +1015,7 @@ def build_feishu_card(presentation: dict[str, t.Any]) -> dict[str, t.Any]:
             {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": truncate_plain_text(label, 40)},
-                "url": str(resource.get("url", "")).strip(),
+                "url": feishu_safe_url(str(resource.get("url", "")).strip()),
                 "type": "primary" if index == 0 else "default",
             }
         )
@@ -1040,7 +1052,7 @@ def build_channel_presentations(
         },
         "feishu": {
             "format": "feishu_interactive_card",
-            "fallback_text": fallback_text,
+            "fallback_text": feishu_safe_text_urls(fallback_text),
             "card": build_feishu_card(presentation),
             "media": {
                 "preview_image_urls": preview_images,
