@@ -82,6 +82,41 @@ class AuthorizationPending(RuntimeError):
     pass
 
 
+class PagepopHTTPError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        status: int,
+        url: str,
+        content_type: str,
+        response_preview: str,
+        parse_error: str = "",
+    ) -> None:
+        message = f"http {status} {url}"
+        if parse_error:
+            message += f": non-json response: {parse_error}"
+        elif response_preview:
+            message += f": {response_preview}"
+        super().__init__(message)
+        self.status = status
+        self.url = url
+        self.content_type = content_type
+        self.response_preview = response_preview
+        self.parse_error = parse_error
+
+    def to_record(self) -> dict[str, t.Any]:
+        return {
+            "kind": "error",
+            "code": "http_error",
+            "message": str(self),
+            "http_status": self.status,
+            "url": self.url,
+            "content_type": self.content_type,
+            "response_preview": self.response_preview,
+            "parse_error": self.parse_error,
+        }
+
+
 @dataclasses.dataclass
 class PendingRun:
     goal: str
@@ -1168,6 +1203,14 @@ def parse_env_bool(*names: str, default: bool = False) -> bool:
     return default
 
 
+def response_preview(raw: bytes, max_len: int = 500) -> str:
+    text = raw.decode("utf-8", errors="replace")
+    text = compact_whitespace(text)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3].rstrip() + "..."
+
+
 def should_warn_default_launch_context(config: Config) -> bool:
     return not config.source_app.strip() and config.display_app_name.strip() == DEFAULT_DISPLAY_APP_NAME
 
@@ -1323,12 +1366,19 @@ def http_json(
             content = resp.read()
     except urllib.error.HTTPError as exc:
         content = exc.read()
+        content_type = exc.headers.get("Content-Type", "") if exc.headers else ""
         try:
             return unwrap_base_response(content)
         except PagepopAPIError:
             raise
-        except Exception as parse_exc:  # pragma: no cover - defensive branch
-            raise RuntimeError(f"http {exc.code} {url}: {parse_exc}") from exc
+        except Exception as parse_exc:
+            raise PagepopHTTPError(
+                status=exc.code,
+                url=url,
+                content_type=content_type,
+                response_preview=response_preview(content),
+                parse_error=str(parse_exc),
+            ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"request failed: {url}: {exc}") from exc
 
@@ -2120,6 +2170,9 @@ def main(argv: t.Optional[list[str]] = None) -> int:
             return run_stream_command(config, args)
         raise RuntimeError(f"unsupported command: {args.command}")
     except PagepopAPIError as exc:
+        emit_record(exc.to_record())
+        return 1
+    except PagepopHTTPError as exc:
         emit_record(exc.to_record())
         return 1
     except AuthorizationPending:

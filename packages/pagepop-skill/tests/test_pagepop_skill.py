@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import io
 import json
 import pathlib
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 from types import SimpleNamespace
 
@@ -704,6 +706,33 @@ class PagepopSkillTests(unittest.TestCase):
             client.unwrap_base_response(raw)
         self.assertEqual(ctx.exception.openclaw_reason, "SKILL_KEY_EXPIRED")
         self.assertTrue(ctx.exception.should_reset_access_key())
+
+    def test_http_json_reports_non_json_http_error_preview(self) -> None:
+        error = urllib.error.HTTPError(
+            url="https://example.com/v2/chat",
+            code=500,
+            msg="Internal Server Error",
+            hdrs={"Content-Type": "text/plain"},
+            fp=io.BytesIO(b"upstream exploded"),
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(client.PagepopHTTPError) as ctx:
+                client.http_json(
+                    "POST",
+                    "https://example.com/v2/chat",
+                    payload={"goal": "hello"},
+                )
+
+        exc = ctx.exception
+        self.assertEqual(exc.status, 500)
+        self.assertEqual(exc.url, "https://example.com/v2/chat")
+        self.assertEqual(exc.content_type, "text/plain")
+        self.assertEqual(exc.response_preview, "upstream exploded")
+        self.assertIn("Expecting value", exc.parse_error)
+        record = exc.to_record()
+        self.assertEqual(record["code"], "http_error")
+        self.assertEqual(record["http_status"], 500)
+        self.assertEqual(record["response_preview"], "upstream exploded")
 
     def test_parse_sse_events(self) -> None:
         lines = [
