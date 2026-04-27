@@ -847,12 +847,181 @@ def build_delivery_fallback_text(
     return "\n".join(parts)
 
 
+def normalize_channel_name(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_")
+    aliases = {
+        "lark": "feishu",
+        "feishu_bot": "feishu",
+        "lark_bot": "feishu",
+        "slack_bot": "slack",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def truncate_plain_text(value: str, max_len: int) -> str:
+    value = compact_whitespace(value.strip())
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 1].rstrip() + "…"
+
+
+def slack_escape(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def build_slack_blocks(presentation: dict[str, t.Any]) -> list[dict[str, t.Any]]:
+    headline = str(presentation.get("headline", "")).strip()
+    subtitle = str(presentation.get("subtitle", "")).strip()
+    summary = str(presentation.get("summary", "")).strip()
+    preview_images = [str(url).strip() for url in presentation.get("preview_images", []) if str(url).strip()]
+    actions = [str(item).strip() for item in presentation.get("actions", []) if str(item).strip()]
+    resources = [
+        item for item in presentation.get("resources", []) if isinstance(item, dict) and str(item.get("url", "")).strip()
+    ]
+
+    blocks: list[dict[str, t.Any]] = []
+    if headline:
+        blocks.append(
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": truncate_plain_text(headline, 150),
+                    "emoji": True,
+                },
+            }
+        )
+    if subtitle:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": slack_escape(truncate_plain_text(subtitle, 300))}],
+            }
+        )
+    if summary:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": slack_escape(truncate_plain_text(summary, 2800))},
+            }
+        )
+    for index, image_url in enumerate(preview_images[:3], start=1):
+        blocks.append(
+            {
+                "type": "image",
+                "image_url": image_url,
+                "alt_text": truncate_plain_text(headline or f"PagePop preview {index}", 200),
+            }
+        )
+    if actions:
+        next_steps = "\n".join(f"• {slack_escape(truncate_plain_text(item, 220))}" for item in actions[:3])
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Try next:*\n{next_steps}"}})
+
+    buttons: list[dict[str, t.Any]] = []
+    for index, resource in enumerate(resources[:3]):
+        label = first_non_empty(str(resource.get("label", "")).strip(), f"Open resource {index + 1}")
+        button: dict[str, t.Any] = {
+            "type": "button",
+            "text": {
+                "type": "plain_text",
+                "text": truncate_plain_text(label, 75),
+                "emoji": True,
+            },
+            "url": str(resource.get("url", "")).strip(),
+        }
+        if index == 0:
+            button["style"] = "primary"
+        buttons.append(button)
+    if buttons:
+        blocks.append({"type": "actions", "elements": buttons})
+
+    return blocks
+
+
+def build_feishu_card(presentation: dict[str, t.Any]) -> dict[str, t.Any]:
+    headline = str(presentation.get("headline", "")).strip()
+    subtitle = str(presentation.get("subtitle", "")).strip()
+    summary = str(presentation.get("summary", "")).strip()
+    actions = [str(item).strip() for item in presentation.get("actions", []) if str(item).strip()]
+    resources = [
+        item for item in presentation.get("resources", []) if isinstance(item, dict) and str(item.get("url", "")).strip()
+    ]
+
+    text_parts = []
+    if subtitle:
+        text_parts.append(f"**{subtitle}**")
+    if summary:
+        text_parts.append(summary)
+
+    elements: list[dict[str, t.Any]] = []
+    if text_parts:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n\n".join(text_parts)}})
+    if actions:
+        next_steps = "\n".join(f"- {truncate_plain_text(item, 220)}" for item in actions[:3])
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**可以继续调整：**\n{next_steps}"}})
+
+    buttons: list[dict[str, t.Any]] = []
+    for index, resource in enumerate(resources[:3]):
+        label = first_non_empty(str(resource.get("label", "")).strip(), f"打开资源 {index + 1}")
+        buttons.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": truncate_plain_text(label, 40)},
+                "url": str(resource.get("url", "")).strip(),
+                "type": "primary" if index == 0 else "default",
+            }
+        )
+    if buttons:
+        elements.append({"tag": "action", "actions": buttons})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {
+                "tag": "plain_text",
+                "content": truncate_plain_text(headline or "PagePop artifact ready", 80),
+            },
+        },
+        "elements": elements,
+    }
+
+
+def build_channel_presentations(
+    presentation: dict[str, t.Any],
+    *,
+    source_app: str,
+) -> dict[str, t.Any]:
+    preview_images = [str(url).strip() for url in presentation.get("preview_images", []) if str(url).strip()]
+    fallback_text = str(presentation.get("fallback_text", "")).strip()
+    preferred_channel = normalize_channel_name(source_app)
+    return {
+        "preferred": preferred_channel,
+        "slack": {
+            "format": "slack_block_kit",
+            "fallback_text": fallback_text,
+            "blocks": build_slack_blocks(presentation),
+        },
+        "feishu": {
+            "format": "feishu_interactive_card",
+            "fallback_text": fallback_text,
+            "card": build_feishu_card(presentation),
+            "media": {
+                "preview_image_urls": preview_images,
+                "image_upload_required": bool(preview_images),
+            },
+        },
+    }
+
+
 def build_artifact_delivery(
     summary: dict[str, t.Any],
     *,
     api_base_url: str,
     latest_text_message: str,
     suggestions: list[str],
+    source_app: str = "",
 ) -> dict[str, t.Any]:
     artifact_type = str(summary.get("artifact_type", "")).strip()
     type_label = humanize_artifact_type(artifact_type).title()
@@ -939,6 +1108,11 @@ def build_artifact_delivery(
         "conversation_id": debug["conversation_id"],
         "artifact": artifact,
         "presentation": presentation,
+        "channel_presentations": build_channel_presentations(presentation, source_app=source_app),
+        "target": {
+            "source_app": source_app,
+            "preferred_channel": normalize_channel_name(source_app),
+        },
         "debug": debug,
     }
 
@@ -1605,6 +1779,7 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                                     api_base_url=config.api_base_url,
                                     latest_text_message=latest_text_message,
                                     suggestions=suggestions,
+                                    source_app=config.source_app,
                                 )
                                 delivery_signature = json.dumps(delivery, ensure_ascii=False, sort_keys=True)
                                 if emitted_artifact_delivery_signatures.get(summary_key) != delivery_signature:
@@ -1621,6 +1796,7 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                                     api_base_url=config.api_base_url,
                                     latest_text_message=latest_text_message,
                                     suggestions=suggestions,
+                                    source_app=config.source_app,
                                 )
                                 delivery_signature = json.dumps(delivery, ensure_ascii=False, sort_keys=True)
                                 if emitted_artifact_delivery_signatures.get(ready_key) != delivery_signature:

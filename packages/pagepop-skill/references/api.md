@@ -508,6 +508,95 @@ data: {"conversation_id":"conv_xxx","cmd":"done","offset":12}
     ],
     "fallback_text": "Generated \"Ragdoll Cat Guide\"\nRednote Post · 3 pages\nRagdoll cats are gentle, beautiful, and friendly for first-time cat owners.\nOpen in PagePop for the full rendered view: https://www.pagepop.cn/project?cid=conv_xxx"
   },
+  "channel_presentations": {
+    "preferred": "feishu",
+    "slack": {
+      "format": "slack_block_kit",
+      "fallback_text": "Generated \"Ragdoll Cat Guide\"\nRednote Post · 3 pages\nRagdoll cats are gentle, beautiful, and friendly for first-time cat owners.\nOpen in PagePop for the full rendered view: https://www.pagepop.cn/project?cid=conv_xxx",
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "Generated \"Ragdoll Cat Guide\"",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "Ragdoll cats are gentle, beautiful, and friendly for first-time cat owners."
+          }
+        },
+        {
+          "type": "actions",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Open in PagePop",
+                "emoji": true
+              },
+              "url": "https://www.pagepop.cn/project?cid=conv_xxx",
+              "style": "primary"
+            }
+          ]
+        }
+      ]
+    },
+    "feishu": {
+      "format": "feishu_interactive_card",
+      "fallback_text": "Generated \"Ragdoll Cat Guide\"\nRednote Post · 3 pages\nRagdoll cats are gentle, beautiful, and friendly for first-time cat owners.\nOpen in PagePop for the full rendered view: https://www.pagepop.cn/project?cid=conv_xxx",
+      "card": {
+        "config": {
+          "wide_screen_mode": true
+        },
+        "header": {
+          "template": "blue",
+          "title": {
+            "tag": "plain_text",
+            "content": "Generated \"Ragdoll Cat Guide\""
+          }
+        },
+        "elements": [
+          {
+            "tag": "div",
+            "text": {
+              "tag": "lark_md",
+              "content": "**Rednote Post · 3 pages**\n\nRagdoll cats are gentle, beautiful, and friendly for first-time cat owners."
+            }
+          },
+          {
+            "tag": "action",
+            "actions": [
+              {
+                "tag": "button",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "Open in PagePop"
+                },
+                "url": "https://www.pagepop.cn/project?cid=conv_xxx",
+                "type": "primary"
+              }
+            ]
+          }
+        ]
+      },
+      "media": {
+        "preview_image_urls": [
+          "https://example.com/cover-1.png",
+          "https://example.com/cover-2.png"
+        ],
+        "image_upload_required": true
+      }
+    }
+  },
+  "target": {
+    "source_app": "feishu",
+    "preferred_channel": "feishu"
+  },
   "debug": {
     "conversation_id": "conv_xxx",
     "message_id": "msg_xxx",
@@ -520,6 +609,8 @@ data: {"conversation_id":"conv_xxx","cmd":"done","offset":12}
 
 建议 channel 侧这样消费：
 
+- 飞书、Slack 等富渲染宿主：优先读取 `channel_presentations.<source_app>`。
+- 飞书图片需要宿主侧上传换取图片 key；skill 只在 `channel_presentations.feishu.media.preview_image_urls` 暴露待上传 URL。
 - 不支持富卡片：直接展示 `presentation.fallback_text`
 - 轻量富文本：展示 `headline / subtitle / summary / actions`
 - richer renderer：展示 `preview_images / resources`，并优先把 `Open in PagePop` 渲染成跳转入口，再把 `debug` 折叠到详情区

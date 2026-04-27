@@ -16,7 +16,7 @@ On first use, the user opens a PagePop authorization page in a browser and confi
 - Start a new conversation when explicitly requested.
 - List locally saved conversations for switch-chat flows.
 - Stream PagePop progress and artifact events.
-- Emit a generic artifact delivery view for host applications.
+- Emit a generic artifact delivery view plus channel-aware presentation payloads for host applications.
 - Check whether the installed package should be updated.
 
 ## Commands
@@ -58,6 +58,15 @@ When a host invokes this skill on behalf of another app, it should pass launch c
 - `return_target`
 
 If no launch context is provided, the authorization page falls back to the default host label.
+
+Artifact delivery events include:
+
+- `presentation`: channel-neutral content for fallback renderers.
+- `channel_presentations.slack`: Slack Block Kit blocks.
+- `channel_presentations.feishu`: Feishu interactive-card payload plus media upload hints.
+- `target.preferred_channel`: normalized from `source_app` when the host passes launch context.
+
+Hosts should prefer their matching `channel_presentations` entry, then fall back to `presentation.fallback_text`.
 
 ## Output
 

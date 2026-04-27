@@ -636,6 +636,56 @@ class PagepopSkillTests(unittest.TestCase):
             "Open in PagePop for the full rendered view: https://www.pagepop.cn/project?cid=conv-1",
             delivery["presentation"]["fallback_text"],
         )
+        self.assertEqual(delivery["target"]["preferred_channel"], "")
+        self.assertIn("slack", delivery["channel_presentations"])
+        self.assertIn("feishu", delivery["channel_presentations"])
+
+    def test_build_artifact_delivery_includes_channel_presentations(self) -> None:
+        delivery = client.build_artifact_delivery(
+            {
+                "source": "finish_work",
+                "conversation_id": "conv-1",
+                "message_id": "msg-1",
+                "artifact_id": "artifact-1",
+                "artifact_type": "slides",
+                "status": "done",
+                "title": "Launch Plan",
+                "text_preview": "A concise launch plan for the new product.",
+                "page_count": 5,
+                "urls": [
+                    "https://example.com/slide-1.png",
+                    "https://example.com/export.pdf",
+                ],
+                "ready": True,
+            },
+            api_base_url="https://pc-api.pagepop.cn",
+            latest_text_message="",
+            suggestions=["Make it more executive friendly"],
+            source_app="slack",
+        )
+
+        self.assertEqual(delivery["target"]["source_app"], "slack")
+        self.assertEqual(delivery["channel_presentations"]["preferred"], "slack")
+
+        slack = delivery["channel_presentations"]["slack"]
+        self.assertEqual(slack["format"], "slack_block_kit")
+        self.assertEqual(slack["blocks"][0]["type"], "header")
+        self.assertEqual(slack["blocks"][0]["text"]["text"], 'Generated "Launch Plan"')
+        self.assertTrue(any(block["type"] == "image" for block in slack["blocks"]))
+        slack_buttons = [
+            element
+            for block in slack["blocks"]
+            if block["type"] == "actions"
+            for element in block["elements"]
+        ]
+        self.assertEqual(slack_buttons[0]["url"], "https://www.pagepop.cn/project?cid=conv-1")
+
+        feishu = delivery["channel_presentations"]["feishu"]
+        self.assertEqual(feishu["format"], "feishu_interactive_card")
+        self.assertTrue(feishu["card"]["config"]["wide_screen_mode"])
+        self.assertEqual(feishu["card"]["header"]["title"]["content"], 'Generated "Launch Plan"')
+        self.assertEqual(feishu["media"]["preview_image_urls"], ["https://example.com/slide-1.png"])
+        self.assertTrue(feishu["media"]["image_upload_required"])
 
     def test_unwrap_base_response_success(self) -> None:
         raw = json.dumps({"code": 1000, "data": {"conversation_id": "conv-1"}}).encode("utf-8")
