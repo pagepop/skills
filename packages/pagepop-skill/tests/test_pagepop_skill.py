@@ -432,6 +432,125 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertIsNone(next_state.pending_run)
             self.assertEqual(next_state.saved_conversations[0].conversation_id, "conv-new")
 
+    def test_resume_stream_uses_active_conversation_without_submit_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(
+                state_path,
+                client.SkillState(
+                    access_key="pp_sk_existing",
+                    pending_run=client.PendingRun(
+                        goal="生成一篇小红书，内容是奶牛猫，带3张图",
+                        artifact_type="auto",
+                        conversation_id="conv-prev",
+                    ),
+                    active_conversation_id="conv-prev",
+                    active_conversation_updated_at="2026-04-22T10:00:00Z",
+                    saved_conversations=[
+                        client.SavedConversation(
+                            conversation_id="conv-prev",
+                            label="奶牛猫小红书",
+                            last_goal="生成一篇小红书，内容是奶牛猫，带3张图",
+                            artifact_type="rednote",
+                            last_activity_at="2026-04-22T10:00:00Z",
+                        )
+                    ],
+                ),
+            )
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                conversation_id="",
+                resume_conversation_id="",
+                offset=5,
+            )
+
+            with mock.patch.object(client, "emit_skill_update_event"), mock.patch.object(
+                client,
+                "submit_chat",
+            ) as submit_chat, mock.patch.object(
+                client,
+                "stream_sse_events",
+                return_value=client.StreamResult(conversation_id="conv-prev", terminal_command="done", last_offset=9),
+            ) as stream_sse_events, mock.patch.object(client, "emit_event") as emit_event:
+                self.assertEqual(client.run_resume_stream_command(config, args), 0)
+
+            submit_chat.assert_not_called()
+            stream_sse_events.assert_called_once()
+            self.assertEqual(stream_sse_events.call_args.kwargs["conversation_id"], "conv-prev")
+            self.assertEqual(stream_sse_events.call_args.kwargs["offset"], 5)
+            context_call = next(call for call in emit_event.call_args_list if call.args[0] == "chat_context")
+            self.assertEqual(context_call.kwargs["mode"], "continue")
+            self.assertEqual(context_call.kwargs["conversation_id"], "conv-prev")
+            resumed_call = next(call for call in emit_event.call_args_list if call.args[0] == "stream_resumed")
+            self.assertEqual(resumed_call.kwargs["offset"], 5)
+            next_state = client.load_state(state_path)
+            self.assertEqual(next_state.active_conversation_id, "conv-prev")
+            self.assertIsNotNone(next_state.pending_run)
+            assert next_state.pending_run is not None
+            self.assertEqual(next_state.pending_run.goal, "生成一篇小红书，内容是奶牛猫，带3张图")
+
+    def test_resume_stream_uses_explicit_conversation_without_active_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(state_path, client.SkillState(access_key="pp_sk_existing"))
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                conversation_id="conv-explicit",
+                resume_conversation_id="",
+                offset=0,
+            )
+
+            with mock.patch.object(client, "emit_skill_update_event"), mock.patch.object(
+                client,
+                "submit_chat",
+            ) as submit_chat, mock.patch.object(
+                client,
+                "stream_sse_events",
+                return_value=client.StreamResult(conversation_id="conv-explicit", terminal_command="done", last_offset=2),
+            ) as stream_sse_events, mock.patch.object(client, "emit_event"):
+                self.assertEqual(client.run_resume_stream_command(config, args), 0)
+
+            submit_chat.assert_not_called()
+            self.assertEqual(stream_sse_events.call_args.kwargs["conversation_id"], "conv-explicit")
+
+    def test_resume_stream_requires_conversation_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(state_path, client.SkillState(access_key="pp_sk_existing"))
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                conversation_id="",
+                resume_conversation_id="",
+                offset=0,
+            )
+
+            with mock.patch.object(client, "emit_skill_update_event"), self.assertRaisesRegex(
+                RuntimeError,
+                "conversation_id is required",
+            ):
+                client.run_resume_stream_command(config, args)
+
+    def test_parser_supports_resume_stream_command(self) -> None:
+        args = client.build_parser().parse_args(
+            ["resume-stream", "--conversation-id", "conv-1", "--offset", "7"]
+        )
+
+        self.assertEqual(args.command, "resume-stream")
+        self.assertEqual(args.conversation_id, "conv-1")
+        self.assertEqual(args.offset, 7)
+
     def test_run_conversations_command_prints_saved_conversations(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = pathlib.Path(tmpdir) / "state.json"

@@ -27,7 +27,10 @@ python3 scripts/pagepop_skill.py auth
 python3 scripts/pagepop_skill.py conversations
 python3 scripts/pagepop_skill.py stream --goal "Create a product launch deck"
 python3 scripts/pagepop_skill.py stream --new-chat --goal "Create a rednote post about camping gear"
+python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx --offset 0
 ```
+
+`stream --goal` always submits a chat request before reading SSE events. Use `resume-stream` when the host only needs to replay or continue reading events for an existing conversation without creating a new task.
 
 ## Configuration
 
@@ -78,6 +81,7 @@ The skill emits JSON Lines. Important event kinds include:
 - `chat_context`
 - `conversation_history`
 - `chat_submitted`
+- `stream_resumed`
 - `progress_update`
 - `artifact_update`
 - `artifact_ready`

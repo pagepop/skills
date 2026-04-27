@@ -141,6 +141,14 @@ Production authorization pages use `https://www.pagepop.cn/openclaw/authorize-v2
 默认情况下，skill 还会把最近一次成功对话的 `conversation_id` 持久化为本地 `active_conversation_id`。后续 `stream` 调用如果没有显式传 `conversation_id`，会默认继续这轮对话。
 同时，skill 会把最近保存过的会话写入本地 `saved_conversations`，供 `Switch chat` 流程选择历史会话。
 
+注意：`stream --goal ...` 表示“提交一轮新的用户请求并拉流”，即使它继续的是同一个 `conversation_id`，也会先调用 `POST /v2/chat`。如果宿主只是想查看已有任务状态、回放已有事件、或在断流后续拉结果，应使用：
+
+```bash
+python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx --offset 0
+```
+
+`resume-stream` 只调用 `GET /v2/sse/events`，不会提交新的 chat，也不会清理本地 `pending_run`。如果没有传 `--conversation-id` 或 `--resume-conversation-id`，它会使用本地 `active_conversation_id`；三者都不存在时会报错。
+
 ## 4. Chat 提交
 
 `POST /v2/chat`
@@ -355,6 +363,25 @@ data: {"conversation_id":"conv_xxx","cmd":"done","offset":12}
 ```
 
 随后才会真正发起一轮新的 `POST /v2/chat`。
+
+如果只需要继续读取某个已有会话的 SSE，而不是提交新的用户请求，可以调用：
+
+```bash
+python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx --offset 12
+```
+
+这会先输出：
+
+```json
+{
+  "kind": "stream_resumed",
+  "conversation_id": "conv_xxx",
+  "offset": 12,
+  "message": "Resuming existing PagePop SSE stream without submitting a new chat request."
+}
+```
+
+然后直接请求 `GET /v2/sse/events?conversation_id=conv_xxx&offset=12`。这个命令不会调用 `/v2/chat`，适合宿主用于“查状态/续拉/回放结果”。
 
 如果宿主应用需要列出历史会话供用户切换，可以单独调用：
 

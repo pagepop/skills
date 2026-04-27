@@ -2028,6 +2028,79 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
     raise RuntimeError("failed to finish stream after reauthorization")
 
 
+def resolve_resume_stream_conversation_id(state: SkillState, args: argparse.Namespace) -> str:
+    explicit_conversation_id = (getattr(args, "conversation_id", "") or "").strip()
+    resume_conversation_id = (getattr(args, "resume_conversation_id", "") or "").strip()
+    if explicit_conversation_id and resume_conversation_id and explicit_conversation_id != resume_conversation_id:
+        raise RuntimeError("cannot use --conversation-id and --resume-conversation-id with different values")
+    conversation_id = resume_conversation_id or explicit_conversation_id or state.active_conversation_id
+    if not conversation_id:
+        raise RuntimeError("conversation_id is required when there is no active conversation")
+    return conversation_id
+
+
+def run_resume_stream_command(config: Config, args: argparse.Namespace) -> int:
+    emit_skill_update_event(config)
+    state = load_state(config.state_path)
+    conversation_id = resolve_resume_stream_conversation_id(state, args)
+    offset = int(getattr(args, "offset", 0) or 0)
+    if offset < 0:
+        raise RuntimeError("offset must be greater than or equal to 0")
+    emit_event(
+        "chat_context",
+        **build_chat_context_payload(
+            mode="continue",
+            state=state,
+            conversation_id=conversation_id,
+        ),
+    )
+
+    for auth_attempt in range(2):
+        if not state.access_key:
+            state = ensure_authorized(config, state)
+
+        try:
+            emit_event(
+                "stream_resumed",
+                conversation_id=conversation_id,
+                offset=offset,
+                message="Resuming existing PagePop SSE stream without submitting a new chat request.",
+            )
+            result = stream_sse_events(
+                config,
+                state,
+                conversation_id=conversation_id,
+                offset=offset,
+            )
+            state.active_conversation_id = result.conversation_id
+            state.active_conversation_updated_at = utc_now().isoformat()
+            save_state(config.state_path, state)
+            emit_event(
+                "stream_finished",
+                conversation_id=result.conversation_id,
+                status=result.terminal_command,
+                offset=result.last_offset,
+            )
+            return 0
+        except PagepopAPIError as exc:
+            if auth_attempt == 0 and exc.should_reset_access_key():
+                state.access_key = ""
+                save_state(config.state_path, state)
+                emit_event(
+                    "access_key_reset",
+                    reason=exc.openclaw_reason or exc.reason,
+                    message="Open the authorization page again and confirm once to continue.",
+                    backend_message=exc.message,
+                    title="PagePop authorization expired",
+                    action_text="Re-authorize PagePop",
+                    result_hint="After authorization, return to the source app and continue the current request.",
+                    is_reauth=True,
+                )
+                continue
+            raise
+    raise RuntimeError("failed to resume stream after reauthorization")
+
+
 def run_auth_command(config: Config) -> int:
     emit_skill_update_event(config)
     state = load_state(config.state_path)
@@ -2162,6 +2235,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Optional network reference URL; repeat the flag to pass multiple links",
     )
+
+    resume_stream_parser = subparsers.add_parser(
+        "resume-stream",
+        help="Relay SSE events for an existing conversation without submitting /v2/chat",
+    )
+    resume_stream_parser.add_argument("--conversation-id", default="", help="Existing conversation_id to stream")
+    resume_stream_parser.add_argument(
+        "--resume-conversation-id",
+        default="",
+        help="Explicitly stream a saved conversation by id; useful for switch-chat flows",
+    )
+    resume_stream_parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="SSE offset to resume from; use 0 to replay available events",
+    )
     return parser
 
 
@@ -2180,6 +2270,8 @@ def main(argv: t.Optional[list[str]] = None) -> int:
             return run_clear_state_command(config)
         if args.command == "stream":
             return run_stream_command(config, args)
+        if args.command == "resume-stream":
+            return run_resume_stream_command(config, args)
         raise RuntimeError(f"unsupported command: {args.command}")
     except PagepopAPIError as exc:
         emit_record(exc.to_record())
