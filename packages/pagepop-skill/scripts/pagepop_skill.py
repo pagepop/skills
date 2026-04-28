@@ -158,6 +158,14 @@ class SavedConversation:
 
 
 @dataclasses.dataclass
+class ConversationStreamState:
+    cursor_offset: int = 0
+    last_done_offset: int = 0
+    last_terminal_command: str = ""
+    updated_at: str = dataclasses.field(default_factory=lambda: utc_now().isoformat())
+
+
+@dataclasses.dataclass
 class SkillState:
     access_key: str = ""
     pending_run: t.Optional[PendingRun] = None
@@ -165,6 +173,7 @@ class SkillState:
     active_conversation_id: str = ""
     active_conversation_updated_at: str = ""
     saved_conversations: list[SavedConversation] = dataclasses.field(default_factory=list)
+    conversation_streams: dict[str, ConversationStreamState] = dataclasses.field(default_factory=dict)
     updated_at: str = dataclasses.field(default_factory=lambda: utc_now().isoformat())
 
     @classmethod
@@ -207,6 +216,27 @@ class SkillState:
                         last_activity_at=str(item.get("last_activity_at", "")).strip() or utc_now().isoformat(),
                     )
                 )
+        conversation_streams: dict[str, ConversationStreamState] = {}
+        streams_raw = raw.get("conversation_streams")
+        if isinstance(streams_raw, dict):
+            for raw_conversation_id, item in streams_raw.items():
+                conversation_id = str(raw_conversation_id).strip()
+                if not conversation_id or not isinstance(item, dict):
+                    continue
+                try:
+                    cursor_offset = int(item.get("cursor_offset", 0) or 0)
+                except (TypeError, ValueError):
+                    cursor_offset = 0
+                try:
+                    last_done_offset = int(item.get("last_done_offset", 0) or 0)
+                except (TypeError, ValueError):
+                    last_done_offset = 0
+                conversation_streams[conversation_id] = ConversationStreamState(
+                    cursor_offset=max(cursor_offset, 0),
+                    last_done_offset=max(last_done_offset, 0),
+                    last_terminal_command=str(item.get("last_terminal_command", "")).strip(),
+                    updated_at=str(item.get("updated_at", "")).strip() or utc_now().isoformat(),
+                )
         return cls(
             access_key=str(raw.get("access_key", "")).strip(),
             pending_run=pending_run,
@@ -214,6 +244,7 @@ class SkillState:
             active_conversation_id=str(raw.get("active_conversation_id", "")).strip(),
             active_conversation_updated_at=str(raw.get("active_conversation_updated_at", "")).strip(),
             saved_conversations=saved_conversations,
+            conversation_streams=conversation_streams,
             updated_at=str(raw.get("updated_at", "")).strip() or utc_now().isoformat(),
         )
 
@@ -232,6 +263,11 @@ class SkillState:
             payload["active_conversation_updated_at"] = self.active_conversation_updated_at
         if self.saved_conversations:
             payload["saved_conversations"] = [dataclasses.asdict(item) for item in self.saved_conversations]
+        if self.conversation_streams:
+            payload["conversation_streams"] = {
+                conversation_id: dataclasses.asdict(item)
+                for conversation_id, item in sorted(self.conversation_streams.items())
+            }
         return payload
 
     def masked_dict(self) -> dict[str, t.Any]:
@@ -434,18 +470,76 @@ def upsert_saved_conversation(
     return items[:limit]
 
 
-def build_conversation_history_items(saved_conversations: list[SavedConversation]) -> list[dict[str, str]]:
-    items: list[dict[str, str]] = []
+def normalize_sse_offset(value: t.Any) -> int:
+    try:
+        offset = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(offset, 0)
+
+
+def get_conversation_stream_state(state: SkillState, conversation_id: str) -> ConversationStreamState:
+    conversation_id = conversation_id.strip()
+    if not conversation_id:
+        return ConversationStreamState()
+    stream_state = state.conversation_streams.get(conversation_id)
+    if stream_state is None:
+        stream_state = ConversationStreamState()
+        state.conversation_streams[conversation_id] = stream_state
+    return stream_state
+
+
+def update_conversation_stream_state(
+    state: SkillState,
+    *,
+    conversation_id: str,
+    cursor_offset: int,
+    terminal_command: str = "",
+) -> ConversationStreamState:
+    stream_state = get_conversation_stream_state(state, conversation_id)
+    normalized_offset = normalize_sse_offset(cursor_offset)
+    stream_state.cursor_offset = normalized_offset
+    terminal_command = terminal_command.strip()
+    if terminal_command:
+        stream_state.last_terminal_command = terminal_command
+    if terminal_command == "done":
+        stream_state.last_done_offset = normalized_offset
+    stream_state.updated_at = utc_now().isoformat()
+    return stream_state
+
+
+def conversation_stream_payload(stream_state: t.Optional[ConversationStreamState]) -> dict[str, t.Any]:
+    if stream_state is None:
+        return {
+            "sse_cursor_offset": 0,
+            "last_done_offset": 0,
+            "last_terminal_command": "",
+            "sse_cursor_updated_at": "",
+        }
+    return {
+        "sse_cursor_offset": stream_state.cursor_offset,
+        "last_done_offset": stream_state.last_done_offset,
+        "last_terminal_command": stream_state.last_terminal_command,
+        "sse_cursor_updated_at": stream_state.updated_at,
+    }
+
+
+def build_conversation_history_items(
+    saved_conversations: list[SavedConversation],
+    conversation_streams: t.Optional[dict[str, ConversationStreamState]] = None,
+) -> list[dict[str, t.Any]]:
+    streams = conversation_streams or {}
+    items: list[dict[str, t.Any]] = []
     for item in saved_conversations:
-        items.append(
-            {
-                "conversation_id": item.conversation_id,
-                "label": item.label,
-                "last_goal": item.last_goal,
-                "artifact_type": item.artifact_type,
-                "last_activity_at": item.last_activity_at,
-            }
-        )
+        payload = {
+            "conversation_id": item.conversation_id,
+            "label": item.label,
+            "last_goal": item.last_goal,
+            "artifact_type": item.artifact_type,
+            "last_activity_at": item.last_activity_at,
+        }
+        payload.update(conversation_stream_payload(streams.get(item.conversation_id)))
+        items.append(payload)
     return items
 
 
@@ -1773,11 +1867,20 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                 for event in parse_sse_events(line.decode("utf-8", errors="replace") for line in resp):
                     payload = event.data
                     now_monotonic = time.monotonic()
+                    event_offset: t.Optional[int] = None
                     if isinstance(payload, dict):
                         try:
-                            last_offset = int(payload.get("offset", last_offset))
+                            event_offset = normalize_sse_offset(payload.get("offset", last_offset))
+                            last_offset = event_offset
                         except (TypeError, ValueError):
                             pass
+                    if event_offset is not None:
+                        update_conversation_stream_state(
+                            state,
+                            conversation_id=conversation_id,
+                            cursor_offset=event_offset,
+                        )
+                        save_state(config.state_path, state)
                     emit_event(
                         "sse_event",
                         conversation_id=conversation_id,
@@ -1867,6 +1970,13 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                     if event.event == "control" and isinstance(payload, dict):
                         cmd = str(payload.get("cmd", "")).strip()
                         if cmd in TERMINAL_CONTROL_COMMANDS:
+                            update_conversation_stream_state(
+                                state,
+                                conversation_id=conversation_id,
+                                cursor_offset=last_offset,
+                                terminal_command=cmd,
+                            )
+                            save_state(config.state_path, state)
                             return StreamResult(
                                 conversation_id=conversation_id,
                                 terminal_command=cmd,
@@ -1875,6 +1985,13 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                         if cmd == "retry":
                             break
                 else:
+                    update_conversation_stream_state(
+                        state,
+                        conversation_id=conversation_id,
+                        cursor_offset=last_offset,
+                        terminal_command="done",
+                    )
+                    save_state(config.state_path, state)
                     return StreamResult(
                         conversation_id=conversation_id,
                         terminal_command="done",
@@ -1979,7 +2096,7 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
             conversation_id = str(chat_data.get("conversation_id", "")).strip()
             if not conversation_id:
                 raise RuntimeError("chat response missing conversation_id")
-            sse_max_offset = int(chat_data.get("sse_max_offset", 0) or 0)
+            sse_max_offset = normalize_sse_offset(chat_data.get("sse_max_offset", 0))
             emit_event(
                 "chat_submitted",
                 conversation_id=conversation_id,
@@ -1987,6 +2104,11 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
             )
             state.active_conversation_id = conversation_id
             state.active_conversation_updated_at = utc_now().isoformat()
+            update_conversation_stream_state(
+                state,
+                conversation_id=conversation_id,
+                cursor_offset=sse_max_offset,
+            )
             state.saved_conversations = upsert_saved_conversation(
                 state.saved_conversations,
                 conversation_id=conversation_id,
@@ -1999,6 +2121,12 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
                 state,
                 conversation_id=conversation_id,
                 offset=sse_max_offset,
+            )
+            update_conversation_stream_state(
+                state,
+                conversation_id=result.conversation_id,
+                cursor_offset=result.last_offset,
+                terminal_command=result.terminal_command,
             )
             state.pending_run = None
             save_state(config.state_path, state)
@@ -2039,13 +2167,31 @@ def resolve_resume_stream_conversation_id(state: SkillState, args: argparse.Name
     return conversation_id
 
 
+def resolve_resume_stream_offset(state: SkillState, conversation_id: str, args: argparse.Namespace) -> tuple[int, str]:
+    explicit_offset = getattr(args, "offset", None)
+    if explicit_offset is not None:
+        offset = normalize_sse_offset(explicit_offset)
+        return offset, "explicit"
+    stream_state = state.conversation_streams.get(conversation_id)
+    if stream_state is not None:
+        return stream_state.cursor_offset, "state"
+    return 0, "default"
+
+
 def run_resume_stream_command(config: Config, args: argparse.Namespace) -> int:
     emit_skill_update_event(config)
     state = load_state(config.state_path)
     conversation_id = resolve_resume_stream_conversation_id(state, args)
-    offset = int(getattr(args, "offset", 0) or 0)
-    if offset < 0:
+    raw_offset = getattr(args, "offset", None)
+    if raw_offset is not None and int(raw_offset) < 0:
         raise RuntimeError("offset must be greater than or equal to 0")
+    offset, offset_source = resolve_resume_stream_offset(state, conversation_id, args)
+    update_conversation_stream_state(
+        state,
+        conversation_id=conversation_id,
+        cursor_offset=offset,
+    )
+    save_state(config.state_path, state)
     emit_event(
         "chat_context",
         **build_chat_context_payload(
@@ -2064,6 +2210,7 @@ def run_resume_stream_command(config: Config, args: argparse.Namespace) -> int:
                 "stream_resumed",
                 conversation_id=conversation_id,
                 offset=offset,
+                offset_source=offset_source,
                 message="Resuming existing PagePop SSE stream without submitting a new chat request.",
             )
             result = stream_sse_events(
@@ -2071,6 +2218,12 @@ def run_resume_stream_command(config: Config, args: argparse.Namespace) -> int:
                 state,
                 conversation_id=conversation_id,
                 offset=offset,
+            )
+            update_conversation_stream_state(
+                state,
+                conversation_id=result.conversation_id,
+                cursor_offset=result.last_offset,
+                terminal_command=result.terminal_command,
             )
             state.active_conversation_id = result.conversation_id
             state.active_conversation_updated_at = utc_now().isoformat()
@@ -2121,6 +2274,9 @@ def run_status_command(config: Config) -> int:
             "update_channel": config.update_channel,
             "active_conversation_id": state.active_conversation_id,
             "active_conversation_updated_at": state.active_conversation_updated_at,
+            "active_conversation_stream": conversation_stream_payload(
+                state.conversation_streams.get(state.active_conversation_id)
+            ),
         }
     )
     return 0
@@ -2132,7 +2288,7 @@ def run_conversations_command(config: Config) -> int:
         {
             "kind": "conversation_history",
             "active_conversation_id": state.active_conversation_id,
-            "items": build_conversation_history_items(state.saved_conversations),
+            "items": build_conversation_history_items(state.saved_conversations, state.conversation_streams),
         }
     )
     return 0
@@ -2249,8 +2405,8 @@ def build_parser() -> argparse.ArgumentParser:
     resume_stream_parser.add_argument(
         "--offset",
         type=int,
-        default=0,
-        help="SSE offset to resume from; use 0 to replay available events",
+        default=None,
+        help="SSE offset to resume from; defaults to the saved cursor for this conversation",
     )
     return parser
 

@@ -147,7 +147,9 @@ Production authorization pages use `https://www.pagepop.cn/openclaw/authorize-v2
 python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx --offset 0
 ```
 
-`resume-stream` 只调用 `GET /v2/sse/events`，不会提交新的 chat，也不会清理本地 `pending_run`。如果没有传 `--conversation-id` 或 `--resume-conversation-id`，它会使用本地 `active_conversation_id`；三者都不存在时会报错。
+`resume-stream` 只调用 `GET /v2/sse/events`，不会提交新的 chat，也不会清理本地 `pending_run`。如果没有显式传 `--offset`，它会使用该 `conversation_id` 本地保存的 `cursor_offset`；没有本地 cursor 时从 `0` 开始。如果没有传 `--conversation-id` 或 `--resume-conversation-id`，它会使用本地 `active_conversation_id`；三者都不存在时会报错。
+
+SSE offset 是当前服务端队列缓存内的 cursor，不是 conversation 维度永久递增的最大值。服务端缓存过期后，下一轮 chat 返回的 `sse_max_offset` 可能小于本地记录，甚至重新从 `0` 或 `1` 开始。skill 会以本轮 `POST /v2/chat` 返回的 `sse_max_offset` 作为拉流起点，并在收到 SSE 事件时把本地 `cursor_offset` 更新为事件中的 offset，即使该 offset 小于本地旧值。
 
 ## 4. Chat 提交
 
@@ -370,6 +372,12 @@ data: {"conversation_id":"conv_xxx","cmd":"done","offset":12}
 python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx --offset 12
 ```
 
+如果省略 `--offset`，skill 会读取本地保存的 `cursor_offset`：
+
+```bash
+python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
+```
+
 这会先输出：
 
 ```json
@@ -377,6 +385,7 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx --offs
   "kind": "stream_resumed",
   "conversation_id": "conv_xxx",
   "offset": 12,
+  "offset_source": "state",
   "message": "Resuming existing PagePop SSE stream without submitting a new chat request."
 }
 ```

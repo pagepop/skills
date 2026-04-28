@@ -30,7 +30,7 @@ python3 scripts/pagepop_skill.py stream --new-chat --goal "Create a rednote post
 python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx --offset 0
 ```
 
-`stream --goal` always submits a chat request before reading SSE events. Use `resume-stream` when the host only needs to replay or continue reading events for an existing conversation without creating a new task.
+`stream --goal` always submits a chat request before reading SSE events. Use `resume-stream` when the host only needs to replay or continue reading events for an existing conversation without creating a new task. When `--offset` is omitted, `resume-stream` uses the saved SSE cursor for that conversation.
 
 ## Configuration
 

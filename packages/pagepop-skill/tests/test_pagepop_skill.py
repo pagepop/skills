@@ -432,6 +432,50 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertIsNone(next_state.pending_run)
             self.assertEqual(next_state.saved_conversations[0].conversation_id, "conv-new")
 
+    def test_stream_uses_chat_sse_max_offset_even_when_local_cursor_is_larger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(
+                state_path,
+                client.SkillState(
+                    access_key="pp_sk_existing",
+                    active_conversation_id="conv-prev",
+                    active_conversation_updated_at="2026-04-22T10:00:00Z",
+                    conversation_streams={
+                        "conv-prev": client.ConversationStreamState(cursor_offset=100, last_done_offset=100),
+                    },
+                ),
+            )
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                goal="继续生成一版",
+                artifact_type="auto",
+                link=[],
+                conversation_id="",
+                resume_conversation_id="",
+                new_conversation=False,
+            )
+
+            with mock.patch.object(client, "emit_skill_update_event"), mock.patch.object(
+                client,
+                "submit_chat",
+                return_value={"conversation_id": "conv-prev", "sse_max_offset": 1},
+            ), mock.patch.object(
+                client,
+                "stream_sse_events",
+                return_value=client.StreamResult(conversation_id="conv-prev", terminal_command="done", last_offset=4),
+            ) as stream_sse_events, mock.patch.object(client, "emit_event"):
+                self.assertEqual(client.run_stream_command(config, args), 0)
+
+            self.assertEqual(stream_sse_events.call_args.kwargs["offset"], 1)
+            next_state = client.load_state(state_path)
+            self.assertEqual(next_state.conversation_streams["conv-prev"].cursor_offset, 4)
+            self.assertEqual(next_state.conversation_streams["conv-prev"].last_done_offset, 4)
+
     def test_resume_stream_uses_active_conversation_without_submit_chat(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = pathlib.Path(tmpdir) / "state.json"
@@ -487,11 +531,14 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(context_call.kwargs["conversation_id"], "conv-prev")
             resumed_call = next(call for call in emit_event.call_args_list if call.args[0] == "stream_resumed")
             self.assertEqual(resumed_call.kwargs["offset"], 5)
+            self.assertEqual(resumed_call.kwargs["offset_source"], "explicit")
             next_state = client.load_state(state_path)
             self.assertEqual(next_state.active_conversation_id, "conv-prev")
             self.assertIsNotNone(next_state.pending_run)
             assert next_state.pending_run is not None
             self.assertEqual(next_state.pending_run.goal, "生成一篇小红书，内容是奶牛猫，带3张图")
+            self.assertEqual(next_state.conversation_streams["conv-prev"].cursor_offset, 9)
+            self.assertEqual(next_state.conversation_streams["conv-prev"].last_done_offset, 9)
 
     def test_resume_stream_uses_explicit_conversation_without_active_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -520,6 +567,80 @@ class PagepopSkillTests(unittest.TestCase):
 
             submit_chat.assert_not_called()
             self.assertEqual(stream_sse_events.call_args.kwargs["conversation_id"], "conv-explicit")
+
+    def test_resume_stream_uses_saved_cursor_when_offset_is_not_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(
+                state_path,
+                client.SkillState(
+                    access_key="pp_sk_existing",
+                    active_conversation_id="conv-prev",
+                    conversation_streams={
+                        "conv-prev": client.ConversationStreamState(cursor_offset=12, last_done_offset=10),
+                    },
+                ),
+            )
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                conversation_id="",
+                resume_conversation_id="",
+                offset=None,
+            )
+
+            with mock.patch.object(client, "emit_skill_update_event"), mock.patch.object(
+                client,
+                "stream_sse_events",
+                return_value=client.StreamResult(conversation_id="conv-prev", terminal_command="done", last_offset=15),
+            ) as stream_sse_events, mock.patch.object(client, "emit_event") as emit_event:
+                self.assertEqual(client.run_resume_stream_command(config, args), 0)
+
+            self.assertEqual(stream_sse_events.call_args.kwargs["offset"], 12)
+            resumed_call = next(call for call in emit_event.call_args_list if call.args[0] == "stream_resumed")
+            self.assertEqual(resumed_call.kwargs["offset_source"], "state")
+            next_state = client.load_state(state_path)
+            self.assertEqual(next_state.conversation_streams["conv-prev"].cursor_offset, 15)
+            self.assertEqual(next_state.conversation_streams["conv-prev"].last_done_offset, 15)
+
+    def test_resume_stream_explicit_offset_can_reset_saved_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(
+                state_path,
+                client.SkillState(
+                    access_key="pp_sk_existing",
+                    active_conversation_id="conv-prev",
+                    conversation_streams={
+                        "conv-prev": client.ConversationStreamState(cursor_offset=100, last_done_offset=100),
+                    },
+                ),
+            )
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                conversation_id="",
+                resume_conversation_id="",
+                offset=1,
+            )
+
+            with mock.patch.object(client, "emit_skill_update_event"), mock.patch.object(
+                client,
+                "stream_sse_events",
+                return_value=client.StreamResult(conversation_id="conv-prev", terminal_command="done", last_offset=3),
+            ) as stream_sse_events, mock.patch.object(client, "emit_event"):
+                self.assertEqual(client.run_resume_stream_command(config, args), 0)
+
+            self.assertEqual(stream_sse_events.call_args.kwargs["offset"], 1)
+            next_state = client.load_state(state_path)
+            self.assertEqual(next_state.conversation_streams["conv-prev"].cursor_offset, 3)
+            self.assertEqual(next_state.conversation_streams["conv-prev"].last_done_offset, 3)
 
     def test_resume_stream_requires_conversation_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -576,6 +697,9 @@ class PagepopSkillTests(unittest.TestCase):
                             last_activity_at="2026-04-21T09:00:00Z",
                         ),
                     ],
+                    conversation_streams={
+                        "conv-prev": client.ConversationStreamState(cursor_offset=12, last_done_offset=10),
+                    },
                 ),
             )
             config = client.Config(
@@ -591,6 +715,8 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(payload["kind"], "conversation_history")
             self.assertEqual(payload["active_conversation_id"], "conv-prev")
             self.assertEqual(payload["items"][0]["conversation_id"], "conv-prev")
+            self.assertEqual(payload["items"][0]["sse_cursor_offset"], 12)
+            self.assertEqual(payload["items"][0]["last_done_offset"], 10)
             self.assertEqual(payload["items"][1]["label"], "露营装备推荐")
 
     def test_summarize_progress_event_for_heartbeat_control_done(self) -> None:
@@ -888,6 +1014,54 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(events[1].event, "control")
         self.assertEqual(events[1].data["cmd"], "done")
 
+    def test_stream_sse_events_updates_cursor_to_smaller_remote_offset(self) -> None:
+        class FakeSseResponse:
+            def __init__(self) -> None:
+                self.headers = {"Content-Type": "text/event-stream"}
+                self._lines = [
+                    b"event: message\n",
+                    b"data: {\"conversation_id\":\"conv-1\",\"data\":\"hello\",\"offset\":1}\n",
+                    b"\n",
+                    b"event: control\n",
+                    b"data: {\"conversation_id\":\"conv-1\",\"cmd\":\"done\",\"offset\":2}\n",
+                    b"\n",
+                ]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb) -> None:
+                return None
+
+            def __iter__(self):
+                return iter(self._lines)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            state = client.SkillState(
+                access_key="pp_sk_existing",
+                conversation_streams={
+                    "conv-1": client.ConversationStreamState(cursor_offset=100, last_done_offset=100),
+                },
+            )
+            client.save_state(state_path, state)
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+
+            with mock.patch.object(client.urllib.request, "urlopen", return_value=FakeSseResponse()), mock.patch.object(
+                client,
+                "emit_event",
+            ), mock.patch.object(client, "emit_record"):
+                result = client.stream_sse_events(config, state, conversation_id="conv-1", offset=100)
+
+            self.assertEqual(result.last_offset, 2)
+            next_state = client.load_state(state_path)
+            self.assertEqual(next_state.conversation_streams["conv-1"].cursor_offset, 2)
+            self.assertEqual(next_state.conversation_streams["conv-1"].last_done_offset, 2)
+
     def test_state_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = pathlib.Path(tmpdir) / "state.json"
@@ -905,6 +1079,14 @@ class PagepopSkillTests(unittest.TestCase):
                         last_activity_at="2026-04-22T10:00:00Z",
                     )
                 ],
+                conversation_streams={
+                    "conv-1": client.ConversationStreamState(
+                        cursor_offset=12,
+                        last_done_offset=10,
+                        last_terminal_command="done",
+                        updated_at="2026-04-22T10:01:00Z",
+                    )
+                },
             )
             client.save_state(state_path, state)
             loaded = client.load_state(state_path)
@@ -915,6 +1097,9 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(loaded.pending_run.links, ["https://example.com"])
             self.assertEqual(loaded.active_conversation_id, "conv-1")
             self.assertEqual(loaded.saved_conversations[0].label, "Hello deck")
+            self.assertEqual(loaded.conversation_streams["conv-1"].cursor_offset, 12)
+            self.assertEqual(loaded.conversation_streams["conv-1"].last_done_offset, 10)
+            self.assertEqual(loaded.conversation_streams["conv-1"].last_terminal_command, "done")
 
 
 if __name__ == "__main__":
