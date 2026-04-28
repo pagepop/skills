@@ -897,7 +897,8 @@ class PagepopSkillTests(unittest.TestCase):
                 "artifact_type": "slides",
                 "status": "done",
                 "title": "Launch Plan",
-                "text_preview": "A concise launch plan for the new product.",
+                "text_content": "封面: <https://cdn.pagepop.top/gcs/ai/gpt_image2/a_b.png>",
+                "text_preview": "封面: <https://cdn.pagepop.top/gcs/ai/gpt_image2/a_b.png>",
                 "page_count": 5,
                 "urls": [
                     "https://example.com/slide-1.png",
@@ -913,6 +914,7 @@ class PagepopSkillTests(unittest.TestCase):
 
         self.assertEqual(delivery["target"]["source_app"], "slack")
         self.assertEqual(delivery["channel_presentations"]["preferred"], "slack")
+        self.assertIn("gpt%5Fimage2/a%5Fb.png", delivery["artifact"]["display_text"])
 
         slack = delivery["channel_presentations"]["slack"]
         self.assertEqual(slack["format"], "slack_block_kit")
@@ -929,6 +931,8 @@ class PagepopSkillTests(unittest.TestCase):
 
         feishu = delivery["channel_presentations"]["feishu"]
         self.assertEqual(feishu["format"], "feishu_interactive_card")
+        self.assertIn("gpt%5Fimage2/a%5Fb.png", feishu["plain_text"])
+        self.assertIn("export%5Ffile.pdf", feishu["plain_text"])
         self.assertTrue(feishu["card"]["config"]["wide_screen_mode"])
         self.assertEqual(feishu["card"]["header"]["title"]["content"], 'Generated "Launch Plan"')
         self.assertEqual(feishu["media"]["preview_image_urls"], ["https://example.com/slide-1.png"])

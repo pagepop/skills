@@ -1010,6 +1010,36 @@ def feishu_safe_text_urls(value: str) -> str:
     return URL_TEXT_RE.sub(lambda match: feishu_safe_url(match.group(0)), value)
 
 
+def build_feishu_plain_text(presentation: dict[str, t.Any]) -> str:
+    headline = str(presentation.get("headline", "")).strip()
+    subtitle = str(presentation.get("subtitle", "")).strip()
+    full_text = str(presentation.get("full_text", "")).strip()
+    summary = str(presentation.get("summary", "")).strip()
+    actions = [str(item).strip() for item in presentation.get("actions", []) if str(item).strip()]
+    resources = [
+        item for item in presentation.get("resources", []) if isinstance(item, dict) and str(item.get("url", "")).strip()
+    ]
+
+    parts: list[str] = []
+    if headline:
+        parts.append(headline)
+    if subtitle:
+        parts.append(subtitle)
+    if full_text:
+        parts.append(feishu_safe_text_urls(full_text))
+    elif summary:
+        parts.append(feishu_safe_text_urls(summary))
+    if resources:
+        resource_lines = []
+        for resource in resources[:5]:
+            label = first_non_empty(str(resource.get("label", "")).strip(), "Resource")
+            resource_lines.append(f"{label}: {feishu_safe_url(str(resource.get('url', '')).strip())}")
+        parts.append("\n".join(resource_lines))
+    if actions:
+        parts.append("可以继续调整：\n" + "\n".join(f"- {feishu_safe_text_urls(item)}" for item in actions[:3]))
+    return "\n\n".join(parts)
+
+
 def build_slack_blocks(presentation: dict[str, t.Any]) -> list[dict[str, t.Any]]:
     headline = str(presentation.get("headline", "")).strip()
     subtitle = str(presentation.get("subtitle", "")).strip()
@@ -1147,6 +1177,7 @@ def build_channel_presentations(
         "feishu": {
             "format": "feishu_interactive_card",
             "fallback_text": feishu_safe_text_urls(fallback_text),
+            "plain_text": build_feishu_plain_text(presentation),
             "card": build_feishu_card(presentation),
             "media": {
                 "preview_image_urls": preview_images,
@@ -1184,6 +1215,8 @@ def build_artifact_delivery(
         ),
         max_len=220,
     )
+    display_text = feishu_safe_text_urls(text_content)
+    display_summary_text = feishu_safe_text_urls(summary_text)
 
     subtitle_parts = [type_label] if type_label else []
     if isinstance(page_count, int) and page_count > 0:
@@ -1220,6 +1253,8 @@ def build_artifact_delivery(
         "current_version": summary.get("current_version"),
         "text": text_content,
         "text_preview": summary_text,
+        "display_text": display_text,
+        "display_text_preview": display_summary_text,
         "image_urls": image_urls,
         "resource_links": resource_links,
         "pagepop_project_url": pagepop_project_url,
@@ -1229,7 +1264,9 @@ def build_artifact_delivery(
     presentation = {
         "headline": headline,
         "subtitle": subtitle,
+        "full_text": text_content,
         "summary": summary_text,
+        "display_summary": display_summary_text,
         "preview_images": preview_images,
         "actions": actions,
         "resources": presentation_resources,

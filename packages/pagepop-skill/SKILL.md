@@ -71,6 +71,7 @@ Artifact delivery events include:
 
 Hosts should prefer their matching `channel_presentations` entry, then fall back to `presentation.fallback_text`.
 Feishu hosts should avoid rendering raw URLs from generic `presentation`; use the Feishu card buttons or Feishu-specific fallback text so underscores in URLs are not truncated by lark_md auto-linking.
+When composing a Feishu chat message manually, use `channel_presentations.feishu.plain_text` or `artifact.display_text`; do not copy raw URLs from `artifact.text` or `sse_event.data` into `lark_md`.
 
 ## Output
 
