@@ -114,10 +114,10 @@ Production authorization pages use `https://www.pagepop.cn/openclaw/authorize-v2
     "latest_version": "2026.04.22-r1",
     "min_supported_version": "2026.04.20-r4",
     "update_level": "recommended",
-    "download_url": "https://github.com/pagepop/skills/releases/download/v2026.04.22-r1/pagepop-skill-prod-20260422-r1.zip",
+    "download_url": "https://github.com/pagepop/skills/releases/download/pagepop-skill-v2026.04.22-r1/pagepop-skill-prod-2026.04.22-r1.zip",
     "sha256": "abc123",
     "repo": "pagepop/skills",
-    "release_tag": "v2026.04.22-r1",
+    "release_tag": "pagepop-skill-v2026.04.22-r1",
     "published_at": "2026-04-22T10:00:00+08:00",
     "release_notes": [
       "Improve artifact delivery rendering.",
@@ -135,6 +135,8 @@ Production authorization pages use `https://www.pagepop.cn/openclaw/authorize-v2
 - `required`
 
 如果后端没有配置更新策略，或当前 `skill_id/channel` 没有匹配策略，skill 会把这一步静默视为 `none`，不影响正常授权和调用。
+
+当前这是“更新通知”机制，不是自动安装机制。skill 只输出 `skill_update_available` 或 `skill_update_required` 事件，并携带 `download_url`、`sha256`、`release_tag` 等信息；下载、SHA-256 校验、解压安装、以及重启 skill 进程由宿主或用户完成。
 
 默认情况下，skill 在授权阶段不会持续阻塞轮询这个接口直到浏览器确认完成，而是会先输出授权链接并结束本次运行；宿主应用应先把链接展示给用户，再在用户完成授权后重新调用同一个命令。
 
@@ -251,10 +253,10 @@ data: {"conversation_id":"conv_xxx","cmd":"done","offset":12}
   "latest_version": "2026.04.22-r1",
   "min_supported_version": "2026.04.20-r4",
   "update_level": "recommended",
-  "download_url": "https://github.com/pagepop/skills/releases/download/v2026.04.22-r1/pagepop-skill-prod-20260422-r1.zip",
+  "download_url": "https://github.com/pagepop/skills/releases/download/pagepop-skill-v2026.04.22-r1/pagepop-skill-prod-2026.04.22-r1.zip",
   "sha256": "abc123",
   "repo": "pagepop/skills",
-  "release_tag": "v2026.04.22-r1",
+  "release_tag": "pagepop-skill-v2026.04.22-r1",
   "published_at": "2026-04-22T10:00:00+08:00",
   "release_notes": [
     "Improve artifact delivery rendering."
@@ -272,10 +274,10 @@ data: {"conversation_id":"conv_xxx","cmd":"done","offset":12}
   "latest_version": "2026.04.22-r1",
   "min_supported_version": "2026.04.21-r8",
   "update_level": "required",
-  "download_url": "https://github.com/pagepop/skills/releases/download/v2026.04.22-r1/pagepop-skill-prod-20260422-r1.zip",
+  "download_url": "https://github.com/pagepop/skills/releases/download/pagepop-skill-v2026.04.22-r1/pagepop-skill-prod-2026.04.22-r1.zip",
   "sha256": "abc123",
   "repo": "pagepop/skills",
-  "release_tag": "v2026.04.22-r1",
+  "release_tag": "pagepop-skill-v2026.04.22-r1",
   "published_at": "2026-04-22T10:00:00+08:00",
   "release_notes": [
     "Improve artifact delivery rendering."

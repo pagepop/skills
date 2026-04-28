@@ -196,7 +196,7 @@ class PagepopSkillTests(unittest.TestCase):
             package_version="2026.04.21-r8",
             update_channel="prod",
             update_repo="pagepop/skills",
-            update_release_tag="v2026.04.21-r8",
+            update_release_tag="pagepop-skill-v2026.04.21-r8",
         )
 
         with mock.patch.object(
@@ -210,7 +210,7 @@ class PagepopSkillTests(unittest.TestCase):
                 "download_url": "https://github.com/example/release.zip",
                 "sha256": "abc123",
                 "repo": "pagepop/skills",
-                "release_tag": "v2026.04.22-r1",
+                "release_tag": "pagepop-skill-v2026.04.22-r1",
                 "release_notes": ["Fix auth copy"],
                 "message": "A newer PagePop skill is available.",
             },
@@ -220,6 +220,7 @@ class PagepopSkillTests(unittest.TestCase):
         emit_event.assert_called_once()
         self.assertEqual(emit_event.call_args.args[0], "skill_update_available")
         self.assertEqual(emit_event.call_args.kwargs["latest_version"], "2026.04.22-r1")
+        self.assertEqual(emit_event.call_args.kwargs["release_tag"], "pagepop-skill-v2026.04.22-r1")
 
     def test_emit_skill_update_required_raises(self) -> None:
         config = client.Config(
@@ -240,6 +241,7 @@ class PagepopSkillTests(unittest.TestCase):
                 "update_level": "required",
                 "download_url": "https://github.com/example/release.zip",
                 "sha256": "abc123",
+                "release_tag": "pagepop-skill-v2026.04.22-r1",
                 "message": "This PagePop skill version is no longer supported.",
                 "release_notes": ["Fix auth copy"],
             },

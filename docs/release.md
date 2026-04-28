@@ -23,6 +23,8 @@ The safety rule is strict:
 5. After approval, the workflow builds a production package and publishes a GitHub Release.
 6. Configure the PagePop backend update policy to point to the release asset URL and SHA-256 file.
 
+The skill update check is notification-only. The skill emits update metadata, but it does not download, verify, install, or restart itself. The host application, installer, or user workflow must download the release asset, verify the SHA-256 file, install the package, and restart the skill process.
+
 ## Non-Production Builds
 
 Non-production packages are for internal validation only.
