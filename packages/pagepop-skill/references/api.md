@@ -648,7 +648,9 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
 - 飞书、Slack 等富渲染宿主：优先读取 `channel_presentations.<source_app>`。
 - 飞书图片需要宿主侧上传换取图片 key；skill 只在 `channel_presentations.feishu.media.preview_image_urls` 暴露待上传 URL。
 - 飞书不要把通用 `presentation.fallback_text`、`artifact.text`、或 `sse_event.data` 里的裸 URL 直接渲染为 `lark_md`；优先用 `channel_presentations.feishu.card` 的 button `url` 字段。
-- 如果宿主或 agent 必须在飞书里输出纯文本，使用 `channel_presentations.feishu.plain_text` 或 `artifact.display_text`。这些字段会把 URL 中的 `_` 编码为 `%5F`，避免飞书自动链接只截到第一个下划线。
+- skill 会尝试把图片 URL 下载到本地 `PAGEPOP_SKILL_ARTIFACT_DIR`，未配置时默认写入当前工作区的 `.pagepop-artifacts/`。宿主应优先把 `channel_presentations.feishu.media.local_image_messages` 作为飞书图片消息发送，而不是把图片 URL 发成文本。
+- 如果宿主或 agent 必须在飞书里输出纯文本，使用 `channel_presentations.feishu.plain_text` 或 `artifact.display_text`。这些字段会移除图片裸 URL，并把其他 URL 中的 `_` 编码为 `%5F`，避免飞书自动链接只截到第一个下划线。
+- 原始文本仍保留在 `artifact.text`，仅供调试或导出，不适合作为飞书 `lark_md` 直接发送。
 - 不支持富卡片：直接展示 `presentation.fallback_text`
 - 轻量富文本：展示 `headline / subtitle / summary / actions`
 - richer renderer：展示 `preview_images / resources`，并优先把 `Open in PagePop` 渲染成跳转入口，再把 `debug` 折叠到详情区

@@ -48,6 +48,8 @@ Common environment variables:
 - `PAGEPOP_SKILL_RETURN_TARGET`
 - `PAGEPOP_SKILL_UPDATE_CHANNEL`
 - `PAGEPOP_SKILL_WAIT_FOR_AUTHORIZATION`
+- `PAGEPOP_SKILL_ARTIFACT_DIR`
+- `PAGEPOP_SKILL_DOWNLOAD_IMAGES`
 
 The legacy `PAGEPOP_OPENCLAW_*` names are still accepted as compatibility aliases for existing OpenClaw installations. New integrations should use the `PAGEPOP_SKILL_*` names. Host-specific usage notes belong in `adapters/`.
 
@@ -71,7 +73,7 @@ Artifact delivery events include:
 
 Hosts should prefer their matching `channel_presentations` entry, then fall back to `presentation.fallback_text`.
 Feishu hosts should avoid rendering raw URLs from generic `presentation`; use the Feishu card buttons or Feishu-specific fallback text so underscores in URLs are not truncated by lark_md auto-linking.
-When composing a Feishu chat message manually, use `channel_presentations.feishu.plain_text` or `artifact.display_text`; do not copy raw URLs from `artifact.text` or `sse_event.data` into `lark_md`.
+When composing a Feishu chat message manually, send `channel_presentations.feishu.media.local_image_messages` as image messages first, then send `channel_presentations.feishu.plain_text` or `artifact.display_text`; do not copy raw image URLs from `artifact.text` or `sse_event.data` into `lark_md`.
 
 ## Output
 

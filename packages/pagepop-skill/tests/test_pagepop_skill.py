@@ -897,10 +897,11 @@ class PagepopSkillTests(unittest.TestCase):
                 "artifact_type": "slides",
                 "status": "done",
                 "title": "Launch Plan",
-                "text_content": "封面: <https://cdn.pagepop.top/gcs/ai/gpt_image2/a_b.png>",
-                "text_preview": "封面: <https://cdn.pagepop.top/gcs/ai/gpt_image2/a_b.png>",
+                "text_content": "封面: <https://example.com/gpt_image2/a_b.png>",
+                "text_preview": "封面: <https://example.com/gpt_image2/a_b.png>",
                 "page_count": 5,
                 "urls": [
+                    "https://example.com/gpt_image2/a_b.png",
                     "https://example.com/slide-1.png",
                     "https://example.com/export_file.pdf",
                 ],
@@ -910,11 +911,22 @@ class PagepopSkillTests(unittest.TestCase):
             latest_text_message="",
             suggestions=["Use https://example.com/a_b as reference"],
             source_app="slack",
+            image_attachments=[
+                {
+                    "label": "封面",
+                    "source_url": "https://example.com/gpt_image2/a_b.png",
+                    "local_path": "/tmp/pagepop/image-1.png",
+                    "mime_type": "image/png",
+                    "send_as": "image_message",
+                }
+            ],
         )
 
         self.assertEqual(delivery["target"]["source_app"], "slack")
         self.assertEqual(delivery["channel_presentations"]["preferred"], "slack")
-        self.assertIn("gpt%5Fimage2/a%5Fb.png", delivery["artifact"]["display_text"])
+        self.assertIn("已随图片消息发送", delivery["artifact"]["display_text"])
+        self.assertNotIn("gpt_image2/a_b.png", delivery["artifact"]["display_text"])
+        self.assertEqual(delivery["attachments"]["images"][0]["local_path"], "/tmp/pagepop/image-1.png")
 
         slack = delivery["channel_presentations"]["slack"]
         self.assertEqual(slack["format"], "slack_block_kit")
@@ -931,11 +943,17 @@ class PagepopSkillTests(unittest.TestCase):
 
         feishu = delivery["channel_presentations"]["feishu"]
         self.assertEqual(feishu["format"], "feishu_interactive_card")
-        self.assertIn("gpt%5Fimage2/a%5Fb.png", feishu["plain_text"])
+        self.assertIn("已随图片消息发送", feishu["plain_text"])
+        self.assertNotIn("gpt_image2/a_b.png", feishu["plain_text"])
         self.assertIn("export%5Ffile.pdf", feishu["plain_text"])
+        self.assertEqual(feishu["media"]["local_image_messages"][0]["path"], "/tmp/pagepop/image-1.png")
+        self.assertTrue(feishu["media"]["image_message_required"])
         self.assertTrue(feishu["card"]["config"]["wide_screen_mode"])
         self.assertEqual(feishu["card"]["header"]["title"]["content"], 'Generated "Launch Plan"')
-        self.assertEqual(feishu["media"]["preview_image_urls"], ["https://example.com/slide-1.png"])
+        self.assertEqual(
+            feishu["media"]["preview_image_urls"],
+            ["https://example.com/gpt_image2/a_b.png", "https://example.com/slide-1.png"],
+        )
         self.assertTrue(feishu["media"]["image_upload_required"])
         feishu_buttons = [
             action
@@ -956,6 +974,39 @@ class PagepopSkillTests(unittest.TestCase):
             client.feishu_safe_text_urls("Open https://example.com/a_b?x=y_z now"),
             "Open https://example.com/a%5Fb?x=y%5Fz now",
         )
+
+    def test_download_image_attachment_writes_local_file(self) -> None:
+        class FakeImageResponse:
+            headers = {"Content-Type": "image/png"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb) -> None:
+                return None
+
+            def read(self, _size: int) -> bytes:
+                return b"fake-png"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=pathlib.Path(tmpdir) / "state.json",
+                artifact_dir=pathlib.Path(tmpdir) / ".pagepop-artifacts",
+            )
+
+            with mock.patch.object(client.urllib.request, "urlopen", return_value=FakeImageResponse()):
+                attachment = client.download_image_attachment(
+                    config,
+                    conversation_id="conv-1",
+                    url="https://example.com/path/a_b.png",
+                    index=1,
+                )
+
+            self.assertEqual(attachment["label"], "封面")
+            self.assertEqual(attachment["mime_type"], "image/png")
+            self.assertEqual(pathlib.Path(attachment["local_path"]).read_bytes(), b"fake-png")
 
     def test_unwrap_base_response_success(self) -> None:
         raw = json.dumps({"code": 1000, "data": {"conversation_id": "conv-1"}}).encode("utf-8")

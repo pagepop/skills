@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import hashlib
 import json
+import mimetypes
 import os
 import pathlib
 import re
@@ -27,6 +29,8 @@ DEFAULT_UPDATE_CHANNEL = "prod"
 DEFAULT_POLL_TIMEOUT_SECONDS = 600
 DEFAULT_STREAM_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_STREAM_RECONNECTS = 5
+DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 30
+DEFAULT_MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024
 HEARTBEAT_PROGRESS_INTERVAL_SECONDS = 15
 URL_TEXT_RE = re.compile(r"https?://[^\s<>()\"']+")
 
@@ -293,12 +297,16 @@ class Config:
     return_mode: str = "manual"
     return_target: str = ""
     wait_for_authorization: bool = False
+    artifact_dir: pathlib.Path = dataclasses.field(default_factory=lambda: pathlib.Path.cwd() / ".pagepop-artifacts")
+    download_artifact_images: bool = True
     client_type: int = DEFAULT_CLIENT_TYPE
     version: str = DEFAULT_VERSION
     timezone: str = ""
     poll_timeout_seconds: int = DEFAULT_POLL_TIMEOUT_SECONDS
     stream_timeout_seconds: int = DEFAULT_STREAM_TIMEOUT_SECONDS
     max_stream_reconnects: int = DEFAULT_MAX_STREAM_RECONNECTS
+    image_download_timeout_seconds: int = DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_SECONDS
+    max_image_download_bytes: int = DEFAULT_MAX_IMAGE_DOWNLOAD_BYTES
 
 
 @dataclasses.dataclass
@@ -589,6 +597,20 @@ def extract_page_count(payload: t.Any) -> t.Optional[int]:
 def is_image_url(url: str) -> bool:
     path = urllib.parse.urlparse(url).path.lower()
     return path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"))
+
+
+def replace_image_urls_for_display(value: str, image_urls: list[str]) -> str:
+    image_url_set = {url.strip().strip("<>") for url in image_urls if url.strip()}
+    if not value.strip() or not image_url_set:
+        return value
+
+    def replace(match: re.Match[str]) -> str:
+        url = match.group(0).strip().strip("<>")
+        if url in image_url_set:
+            return "已随图片消息发送"
+        return match.group(0)
+
+    return URL_TEXT_RE.sub(replace, value).replace("<已随图片消息发送>", "已随图片消息发送")
 
 
 def build_resource_links(urls: list[str]) -> list[dict[str, str]]:
@@ -1040,6 +1062,23 @@ def build_feishu_plain_text(presentation: dict[str, t.Any]) -> str:
     return "\n\n".join(parts)
 
 
+def build_local_image_messages(image_attachments: list[dict[str, t.Any]]) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    for attachment in image_attachments:
+        local_path = str(attachment.get("local_path", "")).strip()
+        if not local_path:
+            continue
+        messages.append(
+            {
+                "type": "local_image",
+                "path": local_path,
+                "alt_text": str(attachment.get("label", "")).strip() or "PagePop image",
+                "mime_type": str(attachment.get("mime_type", "")).strip(),
+            }
+        )
+    return messages
+
+
 def build_slack_blocks(presentation: dict[str, t.Any]) -> list[dict[str, t.Any]]:
     headline = str(presentation.get("headline", "")).strip()
     subtitle = str(presentation.get("subtitle", "")).strip()
@@ -1163,8 +1202,11 @@ def build_channel_presentations(
     presentation: dict[str, t.Any],
     *,
     source_app: str,
+    image_attachments: t.Optional[list[dict[str, t.Any]]] = None,
 ) -> dict[str, t.Any]:
     preview_images = [str(url).strip() for url in presentation.get("preview_images", []) if str(url).strip()]
+    attachments = image_attachments or []
+    local_image_messages = build_local_image_messages(attachments)
     fallback_text = str(presentation.get("fallback_text", "")).strip()
     preferred_channel = normalize_channel_name(source_app)
     return {
@@ -1181,8 +1223,16 @@ def build_channel_presentations(
             "card": build_feishu_card(presentation),
             "media": {
                 "preview_image_urls": preview_images,
+                "image_attachments": attachments,
+                "local_image_messages": local_image_messages,
+                "image_message_required": bool(preview_images),
                 "image_upload_required": bool(preview_images),
+                "text_should_omit_image_urls": True,
             },
+            "host_instruction": (
+                "Send local_image_messages as Feishu image messages, then send plain_text. "
+                "Do not paste source image URLs into lark_md."
+            ),
         },
     }
 
@@ -1194,6 +1244,7 @@ def build_artifact_delivery(
     latest_text_message: str,
     suggestions: list[str],
     source_app: str = "",
+    image_attachments: t.Optional[list[dict[str, t.Any]]] = None,
 ) -> dict[str, t.Any]:
     artifact_type = str(summary.get("artifact_type", "")).strip()
     type_label = humanize_artifact_type(artifact_type).title()
@@ -1208,14 +1259,17 @@ def build_artifact_delivery(
         str(summary.get("text_content", "")).strip(),
         latest_text_message,
     )
-    summary_text = truncate_text(
+    copyable_text = replace_image_urls_for_display(text_content, image_urls)
+    summary_text = replace_image_urls_for_display(
         first_non_empty(
             str(summary.get("text_preview", "")).strip(),
-            text_content,
+            copyable_text,
         ),
-        max_len=220,
+        image_urls,
     )
-    display_text = feishu_safe_text_urls(text_content)
+    summary_text = truncate_text(summary_text, max_len=220)
+    display_text = feishu_safe_text_urls(copyable_text)
+    display_copyable_text = display_text
     display_summary_text = feishu_safe_text_urls(summary_text)
 
     subtitle_parts = [type_label] if type_label else []
@@ -1252,10 +1306,13 @@ def build_artifact_delivery(
         "pages": page_count,
         "current_version": summary.get("current_version"),
         "text": text_content,
+        "copyable_text": copyable_text,
         "text_preview": summary_text,
         "display_text": display_text,
+        "display_copyable_text": display_copyable_text,
         "display_text_preview": display_summary_text,
         "image_urls": image_urls,
+        "image_attachments": image_attachments or [],
         "resource_links": resource_links,
         "pagepop_project_url": pagepop_project_url,
         "ready": bool(summary.get("ready")),
@@ -1264,10 +1321,11 @@ def build_artifact_delivery(
     presentation = {
         "headline": headline,
         "subtitle": subtitle,
-        "full_text": text_content,
+        "full_text": copyable_text,
         "summary": summary_text,
         "display_summary": display_summary_text,
         "preview_images": preview_images,
+        "image_attachments": image_attachments or [],
         "actions": actions,
         "resources": presentation_resources,
         "fallback_text": fallback_text,
@@ -1286,11 +1344,23 @@ def build_artifact_delivery(
         "conversation_id": debug["conversation_id"],
         "artifact": artifact,
         "presentation": presentation,
-        "channel_presentations": build_channel_presentations(presentation, source_app=source_app),
+        "attachments": {
+            "images": image_attachments or [],
+            "send_images_as": "image_message",
+        },
+        "channel_presentations": build_channel_presentations(
+            presentation,
+            source_app=source_app,
+            image_attachments=image_attachments,
+        ),
         "target": {
             "source_app": source_app,
             "preferred_channel": normalize_channel_name(source_app),
         },
+        "host_instruction": (
+            "If local image attachments are present, send them as image messages and send the structured text separately. "
+            "Keep source image URLs out of chat markdown."
+        ),
         "debug": debug,
     }
 
@@ -1455,6 +1525,11 @@ def build_config(args: argparse.Namespace) -> Config:
     return_target = (
         args.return_target or env_value("PAGEPOP_SKILL_RETURN_TARGET", "PAGEPOP_OPENCLAW_RETURN_TARGET")
     ).strip()
+    artifact_dir = (
+        args.artifact_dir
+        or env_value("PAGEPOP_SKILL_ARTIFACT_DIR", "PAGEPOP_OPENCLAW_ARTIFACT_DIR")
+        or str(pathlib.Path.cwd() / ".pagepop-artifacts")
+    )
     update_channel = (
         env_value("PAGEPOP_SKILL_UPDATE_CHANNEL", "PAGEPOP_OPENCLAW_UPDATE_CHANNEL")
         or manifest.channel
@@ -1483,6 +1558,9 @@ def build_config(args: argparse.Namespace) -> Config:
         return_mode=return_mode,
         return_target=return_target,
         wait_for_authorization=wait_for_authorization,
+        artifact_dir=pathlib.Path(artifact_dir).expanduser().resolve(),
+        download_artifact_images=not bool(args.no_download_images)
+        and parse_env_bool("PAGEPOP_SKILL_DOWNLOAD_IMAGES", "PAGEPOP_OPENCLAW_DOWNLOAD_IMAGES", default=True),
         timezone=timezone,
     )
 
@@ -1865,6 +1943,80 @@ def ensure_authorized(config: Config, state: SkillState) -> SkillState:
     raise AuthorizationPending("authorization is waiting for browser confirmation")
 
 
+def safe_path_part(value: str, default: str = "item") -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip()).strip(".-")
+    return cleaned[:80] or default
+
+
+def image_extension_for_url(url: str, content_type: str = "") -> str:
+    suffix = pathlib.Path(urllib.parse.urlparse(url).path).suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}:
+        return suffix
+    mime_type = content_type.split(";", 1)[0].strip().lower()
+    guessed = mimetypes.guess_extension(mime_type)
+    if guessed in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}:
+        return guessed
+    return ".img"
+
+
+def image_mime_type_for_path(path: pathlib.Path, content_type: str = "") -> str:
+    mime_type = content_type.split(";", 1)[0].strip().lower()
+    if mime_type.startswith("image/"):
+        return mime_type
+    guessed, _ = mimetypes.guess_type(str(path))
+    return guessed or "application/octet-stream"
+
+
+def build_image_attachment_label(index: int) -> str:
+    if index == 1:
+        return "封面"
+    return f"配图 {index - 1}"
+
+
+def download_image_attachment(config: Config, *, conversation_id: str, url: str, index: int) -> dict[str, t.Any]:
+    label = build_image_attachment_label(index)
+    base_payload: dict[str, t.Any] = {
+        "label": label,
+        "source_url": url,
+        "send_as": "image_message",
+    }
+    if not config.download_artifact_images:
+        return {**base_payload, "download_skipped": True}
+
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    conversation_dir = config.artifact_dir / safe_path_part(conversation_id, "conversation")
+    ensure_parent_dir(conversation_dir / "placeholder")
+    req = urllib.request.Request(url, headers={"Accept": "image/*"}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=config.image_download_timeout_seconds) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            extension = image_extension_for_url(url, content_type)
+            local_path = conversation_dir / f"image-{index}-{digest}{extension}"
+            raw = resp.read(config.max_image_download_bytes + 1)
+            if len(raw) > config.max_image_download_bytes:
+                raise RuntimeError("image exceeds max download size")
+            local_path.write_bytes(raw)
+        return {
+            **base_payload,
+            "local_path": str(local_path),
+            "filename": local_path.name,
+            "mime_type": image_mime_type_for_path(local_path, content_type),
+            "size_bytes": local_path.stat().st_size,
+        }
+    except Exception as exc:
+        return {
+            **base_payload,
+            "download_error": str(exc),
+        }
+
+
+def download_image_attachments(config: Config, *, conversation_id: str, image_urls: list[str]) -> list[dict[str, t.Any]]:
+    attachments: list[dict[str, t.Any]] = []
+    for index, url in enumerate(dedupe_strings([url for url in image_urls if url.strip()], limit=10), start=1):
+        attachments.append(download_image_attachment(config, conversation_id=conversation_id, url=url, index=index))
+    return attachments
+
+
 def should_retry_stream(exc: Exception) -> bool:
     return isinstance(exc, (urllib.error.URLError, TimeoutError, OSError, RuntimeError))
 
@@ -1976,12 +2128,18 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                                     artifact=merged_summary,
                                 )
                             if merged_summary.get("ready"):
+                                image_attachments = download_image_attachments(
+                                    config,
+                                    conversation_id=str(merged_summary.get("conversation_id", "")).strip(),
+                                    image_urls=[str(url) for url in merged_summary.get("urls", []) if is_image_url(str(url))],
+                                )
                                 delivery = build_artifact_delivery(
                                     merged_summary,
                                     api_base_url=config.api_base_url,
                                     latest_text_message=latest_text_message,
                                     suggestions=suggestions,
                                     source_app=config.source_app,
+                                    image_attachments=image_attachments,
                                 )
                                 delivery_signature = json.dumps(delivery, ensure_ascii=False, sort_keys=True)
                                 if emitted_artifact_delivery_signatures.get(summary_key) != delivery_signature:
@@ -1999,6 +2157,13 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                                     latest_text_message=latest_text_message,
                                     suggestions=suggestions,
                                     source_app=config.source_app,
+                                    image_attachments=download_image_attachments(
+                                        config,
+                                        conversation_id=str(ready_summary.get("conversation_id", "")).strip(),
+                                        image_urls=[
+                                            str(url) for url in ready_summary.get("urls", []) if is_image_url(str(url))
+                                        ],
+                                    ),
                                 )
                                 delivery_signature = json.dumps(delivery, ensure_ascii=False, sort_keys=True)
                                 if emitted_artifact_delivery_signatures.get(ready_key) != delivery_signature:
@@ -2392,6 +2557,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--login-token-file",
         default=env_value("PAGEPOP_SKILL_LOGIN_TOKEN_FILE", "PAGEPOP_OPENCLAW_LOGIN_TOKEN_FILE"),
         help="Optional local file containing a PagePop login token; when set, auth/init is bypassed and requests use the token header directly",
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        default=env_value("PAGEPOP_SKILL_ARTIFACT_DIR", "PAGEPOP_OPENCLAW_ARTIFACT_DIR"),
+        help="Directory for downloaded PagePop artifact files, defaults to .pagepop-artifacts in the current workspace",
+    )
+    parser.add_argument(
+        "--no-download-images",
+        action="store_true",
+        help="Do not download generated image URLs into local image attachments",
     )
     parser.add_argument(
         "--wait-for-authorization",
