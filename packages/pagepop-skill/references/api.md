@@ -2,7 +2,7 @@
 
 ## Default Configuration
 
-- API Base URL: `https://pc-api.pagepop.cn`
+- API Base URL: region-based production default. Mainland China uses `https://pc-api.pagepop.cn`; non-mainland users use `https://pc-api.pagepop.ai`. Missing region data defaults to `https://pc-api.pagepop.ai`. `PAGEPOP_API_BASE_URL` or `--api-base-url` overrides this selection.
 - Skill ID: `pagepop-skill`
 - Client Name: `openclaw`
 - Client Version: `1.0.0`
@@ -11,7 +11,7 @@
 - Client Type: `11`
 - Version: `openclaw-v1`
 
-Production authorization pages use `https://www.pagepop.cn/openclaw/authorize-v2?session=...`.
+Production authorization pages use the matching PagePop web domain, for example `https://www.pagepop.cn/openclaw/authorize-v2?session=...` in mainland China or `https://www.pagepop.ai/openclaw/authorize-v2?session=...` elsewhere.
 
 ## 1. 初始化授权
 

@@ -19,8 +19,15 @@ PACKAGE_DIR = ROOT / "packages" / "pagepop-skill"
 DIST_DIR = ROOT / "dist"
 MANIFEST_TEMPLATE = PACKAGE_DIR / "skill-manifest.template.json"
 VERSION_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}-r\d+$")
-ALLOWED_PAGEPOP_HOSTS = {"pagepop.cn", "www.pagepop.cn", "pc-api.pagepop.cn"}
-PAGEPOP_HOST_RE = re.compile(r"\b(?:[a-z0-9-]+\.)*pagepop\.cn\b", re.IGNORECASE)
+ALLOWED_PAGEPOP_HOSTS = {
+    "pagepop.cn",
+    "www.pagepop.cn",
+    "pc-api.pagepop.cn",
+    "pagepop.ai",
+    "www.pagepop.ai",
+    "pc-api.pagepop.ai",
+}
+PAGEPOP_HOST_RE = re.compile(r"\b(?:[a-z0-9-]+\.)*pagepop\.(?:cn|ai)\b", re.IGNORECASE)
 
 
 def read_env_file(path: pathlib.Path) -> dict[str, str]:

@@ -42,6 +42,7 @@ Common environment variables:
 - `PAGEPOP_WEB_BASE_URL`
 - `PAGEPOP_SKILL_ID`
 - `PAGEPOP_SKILL_STATE_DIR`
+- `PAGEPOP_SKILL_REGION`
 - `PAGEPOP_SKILL_SOURCE_APP`
 - `PAGEPOP_SKILL_DISPLAY_APP_NAME`
 - `PAGEPOP_SKILL_RETURN_MODE`
@@ -53,6 +54,8 @@ Common environment variables:
 
 The legacy `PAGEPOP_OPENCLAW_*` names are still accepted as compatibility aliases for existing OpenClaw installations. New integrations should use the `PAGEPOP_SKILL_*` names. Host-specific usage notes belong in `adapters/`.
 
+Before invoking this skill, host applications should determine whether the current user is in mainland China or outside mainland China. If `PAGEPOP_API_BASE_URL` is not set, production domain selection is region-based: mainland China (`PAGEPOP_SKILL_REGION=CN` or an Asia/Shanghai-style mainland timezone) uses `https://pc-api.pagepop.cn`; non-mainland users use `https://pc-api.pagepop.ai`. Missing region data defaults to the global `.ai` domain and emits an `integration_warning`.
+
 ## Host Integration
 
 When a host invokes this skill on behalf of another app, it should pass launch context before authorization:
@@ -61,6 +64,7 @@ When a host invokes this skill on behalf of another app, it should pass launch c
 - `display_app_name`
 - `return_mode`
 - `return_target`
+- `region` or `PAGEPOP_SKILL_REGION`, after deciding mainland China vs non-mainland
 
 If no launch context is provided, the authorization page falls back to the default host label.
 

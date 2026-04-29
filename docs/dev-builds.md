@@ -25,6 +25,7 @@ Set local-only values in `.env.dev.local`:
 PAGEPOP_API_BASE_URL=<internal-dev-api-base-url>
 PAGEPOP_WEB_BASE_URL=<internal-dev-web-base-url>
 PAGEPOP_SKILL_STATE_DIR=.pagepop-dev
+PAGEPOP_SKILL_REGION=CN
 PAGEPOP_PACKAGE_VERSION=2026.04.27-r1
 PAGEPOP_SKILL_CHANNEL=dev
 PAGEPOP_RELEASE_TAG=pagepop-skill-dev-v2026.04.27-r1

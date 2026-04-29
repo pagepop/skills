@@ -9,6 +9,9 @@ allowed_pagepop_hosts=(
   'pagepop.cn'
   'www.pagepop.cn'
   'pc-api.pagepop.cn'
+  'pagepop.ai'
+  'www.pagepop.ai'
+  'pc-api.pagepop.ai'
 )
 
 generic_forbidden_patterns=(
@@ -38,7 +41,7 @@ while IFS=: read -r file line _host; do
 done < <(
   rg -n -o --hidden \
     --glob '!.git/**' \
-    '([a-zA-Z0-9-]+\.)*pagepop\.cn' . || true
+    '([a-zA-Z0-9-]+\.)*pagepop\.(cn|ai)' . || true
 )
 
 for pattern in "${generic_forbidden_patterns[@]}"; do

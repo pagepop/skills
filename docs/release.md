@@ -53,6 +53,9 @@ Optional variables for the production environment:
 
 - `PAGEPOP_API_BASE_URL`
 - `PAGEPOP_WEB_BASE_URL`
+- `PAGEPOP_SKILL_REGION`
 - `PAGEPOP_RELEASE_REPO`
 
 Sensitive values must be stored as secrets, not variables.
+
+If `PAGEPOP_API_BASE_URL` is omitted, the skill chooses the production API by region. Host integrations should determine whether the user is in mainland China before invoking the skill. Mainland China uses `https://pc-api.pagepop.cn`; other explicit regions use `https://pc-api.pagepop.ai`. Missing region data defaults to `https://pc-api.pagepop.ai`. Keep explicit API overrides for emergency routing or private test environments only.
