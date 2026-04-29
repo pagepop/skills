@@ -1,0 +1,36 @@
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Build outputs
+dist/*
+!dist/.gitkeep
+build/
+*.zip
+*.tar.gz
+*.sha256
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# PagePop local runtime state
+.pagepop*/
+state.json

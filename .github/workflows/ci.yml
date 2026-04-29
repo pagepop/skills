@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  public-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git fetch --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/merge"
+          else
+            git fetch --depth=1 origin "${GITHUB_SHA}"
+          fi
+          git checkout --detach FETCH_HEAD
+
+      - name: Run public safety check
+        run: bash scripts/check-public-safety.sh
+
+      - name: Run skill unit tests
+        run: python3 -m unittest discover -s packages/pagepop-skill/tests -p 'test_*.py'
+
+      - name: Dry-run production skill build
+        run: |
+          python3 scripts/build-skill.py \
+            --pagepop_package_version 2099.01.01-r1 \
+            --pagepop_skill_channel prod \
+            --pagepop_skill_id pagepop-skill \
+            --pagepop_release_repo pagepop/skills \
+            --pagepop_release_tag pagepop-skill-v2099.01.01-r1

@@ -1,0 +1,9 @@
+{
+  "skill_id": "${PAGEPOP_SKILL_ID}",
+  "package_version": "${PAGEPOP_PACKAGE_VERSION}",
+  "channel": "${PAGEPOP_SKILL_CHANNEL}",
+  "build_sha": "${PAGEPOP_BUILD_SHA}",
+  "repo": "${PAGEPOP_RELEASE_REPO}",
+  "release_tag": "${PAGEPOP_RELEASE_TAG}",
+  "published_at": "${PAGEPOP_PUBLISHED_AT}"
+}
