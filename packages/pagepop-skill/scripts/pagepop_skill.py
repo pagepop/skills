@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import sys
+import tempfile
 import time
 import typing as t
 import urllib.error
@@ -1486,11 +1487,29 @@ def ensure_parent_dir(path: pathlib.Path) -> None:
 def save_state(path: pathlib.Path, state: SkillState) -> None:
     ensure_parent_dir(path)
     state.updated_at = utc_now().isoformat()
-    path.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp_file = tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    tmp_path = pathlib.Path(tmp_file.name)
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        with tmp_file:
+            tmp_file.write(json.dumps(state.to_dict(), ensure_ascii=False, indent=2) + "\n")
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
 
 
 def load_state(path: pathlib.Path) -> SkillState:
@@ -2021,6 +2040,34 @@ def should_retry_stream(exc: Exception) -> bool:
     return isinstance(exc, (urllib.error.URLError, TimeoutError, OSError, RuntimeError))
 
 
+def _emit_artifact_delivery_once(
+    *,
+    config: Config,
+    summary: dict[str, t.Any],
+    summary_key: str,
+    latest_text_message: str,
+    suggestions: list[str],
+    emitted_signatures: dict[str, str],
+) -> None:
+    image_attachments = download_image_attachments(
+        config,
+        conversation_id=str(summary.get("conversation_id", "")).strip(),
+        image_urls=[str(url) for url in summary.get("urls", []) if is_image_url(str(url))],
+    )
+    delivery = build_artifact_delivery(
+        summary,
+        api_base_url=config.api_base_url,
+        latest_text_message=latest_text_message,
+        suggestions=suggestions,
+        source_app=config.source_app,
+        image_attachments=image_attachments,
+    )
+    delivery_signature = json.dumps(delivery, ensure_ascii=False, sort_keys=True)
+    if emitted_signatures.get(summary_key) != delivery_signature:
+        emitted_signatures[summary_key] = delivery_signature
+        emit_record(delivery)
+
+
 def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str, offset: int) -> StreamResult:
     reconnects = 0
     last_offset = int(offset)
@@ -2089,6 +2136,7 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                         if event.event == "control" and str(payload.get("cmd", "")).strip() == "heartbeat":
                             if now_monotonic - last_heartbeat_progress_at >= HEARTBEAT_PROGRESS_INTERVAL_SECONDS:
                                 last_heartbeat_progress_at = now_monotonic
+                                save_state(config.state_path, state)
                                 emit_event(
                                     "progress_update",
                                     conversation_id=conversation_id,
@@ -2128,47 +2176,28 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                                     artifact=merged_summary,
                                 )
                             if merged_summary.get("ready"):
-                                image_attachments = download_image_attachments(
-                                    config,
-                                    conversation_id=str(merged_summary.get("conversation_id", "")).strip(),
-                                    image_urls=[str(url) for url in merged_summary.get("urls", []) if is_image_url(str(url))],
-                                )
-                                delivery = build_artifact_delivery(
-                                    merged_summary,
-                                    api_base_url=config.api_base_url,
+                                _emit_artifact_delivery_once(
+                                    config=config,
+                                    summary=merged_summary,
+                                    summary_key=summary_key,
                                     latest_text_message=latest_text_message,
                                     suggestions=suggestions,
-                                    source_app=config.source_app,
-                                    image_attachments=image_attachments,
+                                    emitted_signatures=emitted_artifact_delivery_signatures,
                                 )
-                                delivery_signature = json.dumps(delivery, ensure_ascii=False, sort_keys=True)
-                                if emitted_artifact_delivery_signatures.get(summary_key) != delivery_signature:
-                                    emitted_artifact_delivery_signatures[summary_key] = delivery_signature
-                                    emit_record(delivery)
 
                         if next_suggestions:
                             for ready_key in list(emitted_artifact_ready):
                                 ready_summary = artifact_summaries.get(ready_key)
                                 if not ready_summary:
                                     continue
-                                delivery = build_artifact_delivery(
-                                    ready_summary,
-                                    api_base_url=config.api_base_url,
+                                _emit_artifact_delivery_once(
+                                    config=config,
+                                    summary=ready_summary,
+                                    summary_key=ready_key,
                                     latest_text_message=latest_text_message,
                                     suggestions=suggestions,
-                                    source_app=config.source_app,
-                                    image_attachments=download_image_attachments(
-                                        config,
-                                        conversation_id=str(ready_summary.get("conversation_id", "")).strip(),
-                                        image_urls=[
-                                            str(url) for url in ready_summary.get("urls", []) if is_image_url(str(url))
-                                        ],
-                                    ),
+                                    emitted_signatures=emitted_artifact_delivery_signatures,
                                 )
-                                delivery_signature = json.dumps(delivery, ensure_ascii=False, sort_keys=True)
-                                if emitted_artifact_delivery_signatures.get(ready_key) != delivery_signature:
-                                    emitted_artifact_delivery_signatures[ready_key] = delivery_signature
-                                    emit_record(delivery)
                     if event.event == "control" and isinstance(payload, dict):
                         cmd = str(payload.get("cmd", "")).strip()
                         if cmd in TERMINAL_CONTROL_COMMANDS:
@@ -2218,6 +2247,21 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                 message=str(exc),
             )
             time.sleep(min(reconnects, 5))
+
+
+def _reset_access_key_and_emit(config: Config, state: SkillState, exc: PagepopAPIError) -> None:
+    state.access_key = ""
+    save_state(config.state_path, state)
+    emit_event(
+        "access_key_reset",
+        reason=exc.openclaw_reason or exc.reason,
+        message="Open the authorization page again and confirm once to continue.",
+        backend_message=exc.message,
+        title="PagePop authorization expired",
+        action_text="Re-authorize PagePop",
+        result_hint="After authorization, return to the source app and continue the current request.",
+        is_reauth=True,
+    )
 
 
 def run_stream_command(config: Config, args: argparse.Namespace) -> int:
@@ -2341,18 +2385,7 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
             return 0
         except PagepopAPIError as exc:
             if auth_attempt == 0 and exc.should_reset_access_key():
-                state.access_key = ""
-                save_state(config.state_path, state)
-                emit_event(
-                    "access_key_reset",
-                    reason=exc.openclaw_reason or exc.reason,
-                    message="Open the authorization page again and confirm once to continue.",
-                    backend_message=exc.message,
-                    title="PagePop authorization expired",
-                    action_text="Re-authorize PagePop",
-                    result_hint="After authorization, return to the source app and continue the current request.",
-                    is_reauth=True,
-                )
+                _reset_access_key_and_emit(config, state, exc)
                 continue
             raise
     raise RuntimeError("failed to finish stream after reauthorization")
@@ -2439,18 +2472,7 @@ def run_resume_stream_command(config: Config, args: argparse.Namespace) -> int:
             return 0
         except PagepopAPIError as exc:
             if auth_attempt == 0 and exc.should_reset_access_key():
-                state.access_key = ""
-                save_state(config.state_path, state)
-                emit_event(
-                    "access_key_reset",
-                    reason=exc.openclaw_reason or exc.reason,
-                    message="Open the authorization page again and confirm once to continue.",
-                    backend_message=exc.message,
-                    title="PagePop authorization expired",
-                    action_text="Re-authorize PagePop",
-                    result_hint="After authorization, return to the source app and continue the current request.",
-                    is_reauth=True,
-                )
+                _reset_access_key_and_emit(config, state, exc)
                 continue
             raise
     raise RuntimeError("failed to resume stream after reauthorization")

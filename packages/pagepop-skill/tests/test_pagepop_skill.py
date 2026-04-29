@@ -1119,6 +1119,62 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(next_state.conversation_streams["conv-1"].cursor_offset, 2)
             self.assertEqual(next_state.conversation_streams["conv-1"].last_done_offset, 2)
 
+    def test_stream_sse_events_persists_smaller_offset_before_stream_failure(self) -> None:
+        class FakeFailingSseResponse:
+            headers = {"Content-Type": "text/event-stream"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb) -> None:
+                return None
+
+            def __iter__(self):
+                yield b"event: message\n"
+                yield b"data: {\"conversation_id\":\"conv-1\",\"data\":\"hello\",\"offset\":1}\n"
+                yield b"\n"
+                raise RuntimeError("connection dropped")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            state = client.SkillState(
+                access_key="pp_sk_existing",
+                conversation_streams={
+                    "conv-1": client.ConversationStreamState(cursor_offset=100, last_done_offset=100),
+                },
+            )
+            client.save_state(state_path, state)
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+                max_stream_reconnects=0,
+            )
+
+            with mock.patch.object(
+                client.urllib.request,
+                "urlopen",
+                return_value=FakeFailingSseResponse(),
+            ), mock.patch.object(client, "emit_event"), mock.patch.object(client, "emit_record"):
+                with self.assertRaises(RuntimeError):
+                    client.stream_sse_events(config, state, conversation_id="conv-1", offset=100)
+
+            next_state = client.load_state(state_path)
+            self.assertEqual(next_state.conversation_streams["conv-1"].cursor_offset, 1)
+            self.assertEqual(next_state.conversation_streams["conv-1"].last_done_offset, 100)
+
+    def test_save_state_does_not_reuse_fixed_tmp_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            fixed_tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
+            fixed_tmp_path.write_text("occupied", encoding="utf-8")
+
+            client.save_state(state_path, client.SkillState(access_key="pp_sk_existing"))
+
+            self.assertTrue(state_path.exists())
+            self.assertEqual(fixed_tmp_path.read_text(encoding="utf-8"), "occupied")
+            self.assertEqual(list(pathlib.Path(tmpdir).glob(".state.json.*.tmp")), [])
+
     def test_state_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = pathlib.Path(tmpdir) / "state.json"
