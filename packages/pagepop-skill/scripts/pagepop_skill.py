@@ -1559,7 +1559,13 @@ def build_region_context_warning(config: Config) -> dict[str, t.Any]:
     }
 
 
+def is_source_install(config: Config) -> bool:
+    return config.package_version == SOURCE_INSTALL_PACKAGE_VERSION
+
+
 def emit_skill_update_event(config: Config) -> None:
+    if is_source_install(config):
+        return
     try:
         update_data = get_skill_update(config)
     except Exception:

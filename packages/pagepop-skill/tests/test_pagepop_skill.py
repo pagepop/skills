@@ -268,6 +268,24 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(emit_event.call_args.kwargs["latest_version"], "2026.04.22-r1")
         self.assertEqual(emit_event.call_args.kwargs["release_tag"], "pagepop-skill-v2026.04.22-r1")
 
+    def test_emit_skill_update_skips_source_install(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.cn",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+            package_version="source",
+            update_channel="prod",
+        )
+
+        with mock.patch.object(client, "get_skill_update") as get_skill_update, mock.patch.object(
+            client,
+            "emit_event",
+        ) as emit_event:
+            client.emit_skill_update_event(config)
+
+        get_skill_update.assert_not_called()
+        emit_event.assert_not_called()
+
     def test_emit_skill_update_required_raises(self) -> None:
         config = client.Config(
             api_base_url="https://pc-api.pagepop.cn",
