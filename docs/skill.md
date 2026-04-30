@@ -6,7 +6,9 @@ The skill should remain host-neutral. Host-specific guidance belongs under `adap
 
 ## Build-Time Fields
 
-The build script renders `skill-manifest.json` from `skill-manifest.template.json`.
+Source checkouts include a public-safe `skill-manifest.json` with `source` defaults so GitHub installs can run without a build step.
+The build script overwrites that file in release packages by rendering `skill-manifest.template.json`.
+Source installs skip release-package update enforcement; users update them through GitHub source pulls.
 
 Required fields:
 

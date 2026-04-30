@@ -39,6 +39,19 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(manifest.package_version, "2099.01.01-r1")
         self.assertEqual(manifest.channel, "prod")
 
+    def test_load_skill_manifest_uses_source_defaults_when_manifest_missing_from_source_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            template_path = pathlib.Path(temp_dir) / "skill-manifest.template.json"
+            template_path.write_text("{}", encoding="utf-8")
+            with mock.patch.object(client, "skill_root_dir", return_value=pathlib.Path(temp_dir)):
+                manifest = client.load_skill_manifest()
+
+        self.assertEqual(manifest.skill_id, "pagepop-skill")
+        self.assertEqual(manifest.package_version, "source")
+        self.assertEqual(manifest.channel, "prod")
+        self.assertEqual(manifest.build_sha, "source")
+        self.assertEqual(manifest.repo, "pagepop/skills")
+
     def test_normalize_login_token_cookie_string(self) -> None:
         self.assertEqual(
             client.normalize_login_token("pagepop-token=abc123; path=/; secure"),
@@ -92,6 +105,39 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(auth_required_call.kwargs["requires_user_action"], True)
         self.assertEqual(auth_required_call.kwargs["pause_execution"], True)
         self.assertEqual(auth_required_call.kwargs["resume_mode"], "rerun_same_command")
+
+    def test_auth_required_emits_region_warning_when_region_context_is_missing(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.ai",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+            source_app="feishu",
+            display_app_name="Feishu",
+            region_context_missing=True,
+        )
+        state = client.SkillState()
+
+        with mock.patch.object(
+            client,
+            "init_auth",
+            return_value={
+                "auth_session_id": "oas-test",
+                "authorize_url": "https://www.pagepop.ai/openclaw/authorize?session=oas-test",
+                "expires_at": "2026-04-20T18:00:00Z",
+                "poll_interval_seconds": 1,
+            },
+        ), mock.patch.object(client, "save_state"), mock.patch.object(client, "emit_event") as emit_event:
+            with self.assertRaises(client.AuthorizationPending):
+                client.ensure_authorized(config, state)
+
+        integration_warning_call = emit_event.call_args_list[0]
+        self.assertEqual(integration_warning_call.args[0], "integration_warning")
+        self.assertEqual(integration_warning_call.kwargs["title"], "Region context missing")
+        self.assertIn("mainland China", integration_warning_call.kwargs["message"])
+        self.assertEqual(integration_warning_call.kwargs["current_api_base_url"], "https://pc-api.pagepop.ai")
+
+        auth_required_call = emit_event.call_args_list[1]
+        self.assertEqual(auth_required_call.args[0], "auth_required")
 
     def test_auth_required_emits_integration_warning_for_default_launch_context(self) -> None:
         config = client.Config(
@@ -221,6 +267,24 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(emit_event.call_args.args[0], "skill_update_available")
         self.assertEqual(emit_event.call_args.kwargs["latest_version"], "2026.04.22-r1")
         self.assertEqual(emit_event.call_args.kwargs["release_tag"], "pagepop-skill-v2026.04.22-r1")
+
+    def test_emit_skill_update_skips_source_install(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.cn",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+            package_version="source",
+            update_channel="prod",
+        )
+
+        with mock.patch.object(client, "get_skill_update") as get_skill_update, mock.patch.object(
+            client,
+            "emit_event",
+        ) as emit_event:
+            client.emit_skill_update_event(config)
+
+        get_skill_update.assert_not_called()
+        emit_event.assert_not_called()
 
     def test_emit_skill_update_required_raises(self) -> None:
         config = client.Config(
@@ -815,6 +879,32 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(
             client.build_pagepop_project_url("http://127.0.0.1:10086", "conv-1"),
             "http://127.0.0.1:11073/project?cid=conv-1",
+        )
+
+    def test_resolve_api_base_url_uses_region_for_production_domains(self) -> None:
+        self.assertEqual(
+            client.resolve_api_base_url("", region="CN", timezone=""),
+            "https://pc-api.pagepop.cn",
+        )
+        self.assertEqual(
+            client.resolve_api_base_url("", region="US", timezone=""),
+            "https://pc-api.pagepop.ai",
+        )
+        self.assertEqual(
+            client.resolve_api_base_url("", region="", timezone="Asia/Shanghai"),
+            "https://pc-api.pagepop.cn",
+        )
+        self.assertEqual(
+            client.resolve_api_base_url("", region="", timezone="America/Los_Angeles"),
+            "https://pc-api.pagepop.ai",
+        )
+        self.assertEqual(
+            client.resolve_api_base_url("", region="", timezone=""),
+            "https://pc-api.pagepop.ai",
+        )
+        self.assertEqual(
+            client.resolve_api_base_url("https://custom.example.test/", region="US", timezone=""),
+            "https://custom.example.test",
         )
 
     def test_build_artifact_delivery_uses_generic_presentation_shape(self) -> None:

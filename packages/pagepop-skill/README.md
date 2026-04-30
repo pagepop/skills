@@ -8,7 +8,9 @@ Build output should be generated from templates and written to `dist/`.
 
 ## Manifest
 
-`skill-manifest.json` is generated from `skill-manifest.template.json`.
+`skill-manifest.json` is committed with public-safe `source` defaults so GitHub source installs can run directly.
+Release packages overwrite it with a generated manifest rendered from `skill-manifest.template.json`.
+Source installs skip release-package update enforcement; update them by pulling the latest GitHub source.
 
 Do not commit generated manifests that contain environment-specific values.
 

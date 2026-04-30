@@ -19,7 +19,9 @@ import urllib.parse
 import urllib.request
 import uuid
 
-DEFAULT_API_BASE_URL = "https://pc-api.pagepop.cn"
+MAINLAND_CHINA_API_BASE_URL = "https://pc-api.pagepop.cn"
+GLOBAL_API_BASE_URL = "https://pc-api.pagepop.ai"
+DEFAULT_API_BASE_URL = GLOBAL_API_BASE_URL
 DEFAULT_SKILL_ID = "pagepop-skill"
 DEFAULT_CLIENT_NAME = "openclaw"
 DEFAULT_CLIENT_VERSION = "1.0.0"
@@ -34,10 +36,45 @@ DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 30
 DEFAULT_MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024
 HEARTBEAT_PROGRESS_INTERVAL_SECONDS = 15
 URL_TEXT_RE = re.compile(r"https?://[^\s<>()\"']+")
+MAINLAND_CHINA_REGION_VALUES = {
+    "cn",
+    "chn",
+    "china",
+    "china-mainland",
+    "cn-mainland",
+    "mainland",
+    "mainland-china",
+    "mainland-cn",
+    "prc",
+    "zh-cn",
+    "zh-hans-cn",
+}
+GLOBAL_REGION_VALUES = {
+    "global",
+    "intl",
+    "international",
+    "non-cn",
+    "non-mainland",
+    "outside-cn",
+    "outside-mainland",
+    "overseas",
+    "world",
+}
+MAINLAND_CHINA_TIMEZONES = {
+    "Asia/Beijing",
+    "Asia/Shanghai",
+    "Asia/Chongqing",
+    "Asia/Harbin",
+    "Asia/Urumqi",
+}
 
 SUCCESS_CODE = 1000
 STATE_FILE_NAME = "state.json"
 MANIFEST_FILE_NAME = "skill-manifest.json"
+MANIFEST_TEMPLATE_FILE_NAME = "skill-manifest.template.json"
+SOURCE_INSTALL_PACKAGE_VERSION = "source"
+SOURCE_INSTALL_BUILD_SHA = "source"
+SOURCE_INSTALL_REPO = "pagepop/skills"
 
 KEY_RESET_REASONS = {
     "SKILL_KEY_INVALID",
@@ -286,6 +323,8 @@ class Config:
     api_base_url: str
     skill_id: str
     state_path: pathlib.Path
+    region: str = ""
+    region_context_missing: bool = False
     package_version: str = "dev"
     update_channel: str = DEFAULT_UPDATE_CHANNEL
     update_repo: str = ""
@@ -332,11 +371,26 @@ def skill_root_dir() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1]
 
 
+def source_install_manifest() -> SkillManifest:
+    return SkillManifest(
+        skill_id=DEFAULT_SKILL_ID,
+        package_version=SOURCE_INSTALL_PACKAGE_VERSION,
+        channel=DEFAULT_UPDATE_CHANNEL,
+        build_sha=SOURCE_INSTALL_BUILD_SHA,
+        repo=SOURCE_INSTALL_REPO,
+        release_tag="",
+        published_at="",
+    )
+
+
 def load_skill_manifest() -> SkillManifest:
-    manifest_path = skill_root_dir() / MANIFEST_FILE_NAME
+    root_dir = skill_root_dir()
+    manifest_path = root_dir / MANIFEST_FILE_NAME
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
+        if (root_dir / MANIFEST_TEMPLATE_FILE_NAME).exists():
+            return source_install_manifest()
         raise RuntimeError(f"skill manifest not found: {manifest_path}") from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"skill manifest is invalid json: {manifest_path}") from exc
@@ -485,6 +539,42 @@ def normalize_sse_offset(value: t.Any) -> int:
     except (TypeError, ValueError):
         return 0
     return max(offset, 0)
+
+
+def normalize_user_region(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    if not normalized:
+        return ""
+    if normalized in MAINLAND_CHINA_REGION_VALUES:
+        return "CN"
+    if normalized in GLOBAL_REGION_VALUES:
+        return "GLOBAL"
+    if len(normalized) == 2 and normalized.isalpha():
+        return normalized.upper()
+    return normalized
+
+
+def infer_user_region_from_timezone(timezone: str) -> str:
+    timezone = timezone.strip()
+    if not timezone:
+        return ""
+    if timezone in MAINLAND_CHINA_TIMEZONES:
+        return "CN"
+    return "GLOBAL"
+
+
+def resolve_user_region(region: str, timezone: str) -> str:
+    return normalize_user_region(region) or infer_user_region_from_timezone(timezone)
+
+
+def resolve_api_base_url(explicit_api_base_url: str, *, region: str, timezone: str) -> str:
+    explicit_api_base_url = explicit_api_base_url.strip()
+    if explicit_api_base_url:
+        return explicit_api_base_url.rstrip("/")
+    resolved_region = resolve_user_region(region, timezone)
+    if resolved_region == "CN":
+        return MAINLAND_CHINA_API_BASE_URL
+    return GLOBAL_API_BASE_URL
 
 
 def get_conversation_stream_state(state: SkillState, conversation_id: str) -> ConversationStreamState:
@@ -1448,7 +1538,34 @@ def build_launch_context_warning(config: Config) -> dict[str, t.Any]:
     }
 
 
+def should_warn_missing_region_context(config: Config) -> bool:
+    return config.region_context_missing
+
+
+def build_region_context_warning(config: Config) -> dict[str, t.Any]:
+    return {
+        "title": "Region context missing",
+        "message": (
+            "The host should determine whether the current user is in mainland China "
+            "before invoking this skill. Pass PAGEPOP_SKILL_REGION=CN for mainland China; "
+            "pass another country/region code or GLOBAL for non-mainland users. "
+            "Without region context, PagePop uses the global .ai production domain."
+        ),
+        "action_text": "Pass user region",
+        "result_hint": "Set PAGEPOP_SKILL_REGION from the host's user, tenant, locale, or deployment context.",
+        "current_region": config.region,
+        "current_api_base_url": config.api_base_url,
+        "default_api_base_url": DEFAULT_API_BASE_URL,
+    }
+
+
+def is_source_install(config: Config) -> bool:
+    return config.package_version == SOURCE_INSTALL_PACKAGE_VERSION
+
+
 def emit_skill_update_event(config: Config) -> None:
+    if is_source_install(config):
+        return
     try:
         update_data = get_skill_update(config)
     except Exception:
@@ -1534,6 +1651,18 @@ def build_config(args: argparse.Namespace) -> Config:
         or env_value("PAGEPOP_SKILL_LOGIN_TOKEN_FILE", "PAGEPOP_OPENCLAW_LOGIN_TOKEN_FILE")
     ).strip()
     timezone = (args.timezone or env_value("PAGEPOP_SKILL_TIMEZONE", "PAGEPOP_OPENCLAW_TIMEZONE")).strip()
+    region = (
+        args.region
+        or env_value(
+            "PAGEPOP_SKILL_REGION",
+            "PAGEPOP_OPENCLAW_REGION",
+            "PAGEPOP_USER_REGION",
+            "PAGEPOP_COUNTRY_CODE",
+        )
+    ).strip()
+    explicit_api_base_url = args.api_base_url or env_value("PAGEPOP_API_BASE_URL", "PAGEPOP_OPENCLAW_API_BASE_URL")
+    resolved_region = resolve_user_region(region, timezone)
+    api_base_url = resolve_api_base_url(explicit_api_base_url, region=region, timezone=timezone)
     source_app = (args.source_app or env_value("PAGEPOP_SKILL_SOURCE_APP", "PAGEPOP_OPENCLAW_SOURCE_APP")).strip()
     display_app_name = (
         args.display_app_name or env_value("PAGEPOP_SKILL_DISPLAY_APP_NAME", "PAGEPOP_OPENCLAW_DISPLAY_APP_NAME")
@@ -1559,9 +1688,11 @@ def build_config(args: argparse.Namespace) -> Config:
         "PAGEPOP_OPENCLAW_WAIT_FOR_AUTHORIZATION",
     )
     return Config(
-        api_base_url=args.api_base_url.rstrip("/"),
+        api_base_url=api_base_url,
         skill_id=(args.skill_id or manifest.skill_id).strip() or manifest.skill_id,
         state_path=state_dir / STATE_FILE_NAME,
+        region=resolved_region,
+        region_context_missing=not explicit_api_base_url.strip() and not resolved_region,
         package_version=manifest.package_version,
         update_channel=update_channel,
         update_repo=manifest.repo,
@@ -1934,6 +2065,8 @@ def ensure_authorized(config: Config, state: SkillState) -> SkillState:
 
     if should_warn_default_launch_context(config):
         emit_event("integration_warning", **build_launch_context_warning(config))
+    if should_warn_missing_region_context(config):
+        emit_event("integration_warning", **build_region_context_warning(config))
 
     init_data = init_auth(config)
     auth_session_id = str(init_data.get("auth_session_id", "")).strip()
@@ -2528,8 +2661,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="PagePop Skill client")
     parser.add_argument(
         "--api-base-url",
-        default=os.getenv("PAGEPOP_API_BASE_URL", DEFAULT_API_BASE_URL),
-        help="PagePop API base URL",
+        default="",
+        help="Explicit PagePop API base URL; overrides region-based production domain selection",
     )
     parser.add_argument(
         "--skill-id",
@@ -2549,6 +2682,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default="",
         help="Optional IANA timezone, for example Asia/Shanghai",
+    )
+    parser.add_argument(
+        "--region",
+        default="",
+        help="Optional user region or country code; mainland China uses pagepop.cn, other regions use pagepop.ai",
     )
     parser.add_argument(
         "--client-version",
