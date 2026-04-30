@@ -39,6 +39,19 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(manifest.package_version, "2099.01.01-r1")
         self.assertEqual(manifest.channel, "prod")
 
+    def test_load_skill_manifest_uses_source_defaults_when_manifest_missing_from_source_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            template_path = pathlib.Path(temp_dir) / "skill-manifest.template.json"
+            template_path.write_text("{}", encoding="utf-8")
+            with mock.patch.object(client, "skill_root_dir", return_value=pathlib.Path(temp_dir)):
+                manifest = client.load_skill_manifest()
+
+        self.assertEqual(manifest.skill_id, "pagepop-skill")
+        self.assertEqual(manifest.package_version, "source")
+        self.assertEqual(manifest.channel, "prod")
+        self.assertEqual(manifest.build_sha, "source")
+        self.assertEqual(manifest.repo, "pagepop/skills")
+
     def test_normalize_login_token_cookie_string(self) -> None:
         self.assertEqual(
             client.normalize_login_token("pagepop-token=abc123; path=/; secure"),

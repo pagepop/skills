@@ -1,0 +1,9 @@
+{
+  "skill_id": "pagepop-skill",
+  "package_version": "source",
+  "channel": "prod",
+  "build_sha": "source",
+  "repo": "pagepop/skills",
+  "release_tag": "",
+  "published_at": ""
+}

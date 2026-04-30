@@ -71,6 +71,10 @@ MAINLAND_CHINA_TIMEZONES = {
 SUCCESS_CODE = 1000
 STATE_FILE_NAME = "state.json"
 MANIFEST_FILE_NAME = "skill-manifest.json"
+MANIFEST_TEMPLATE_FILE_NAME = "skill-manifest.template.json"
+SOURCE_INSTALL_PACKAGE_VERSION = "source"
+SOURCE_INSTALL_BUILD_SHA = "source"
+SOURCE_INSTALL_REPO = "pagepop/skills"
 
 KEY_RESET_REASONS = {
     "SKILL_KEY_INVALID",
@@ -367,11 +371,26 @@ def skill_root_dir() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1]
 
 
+def source_install_manifest() -> SkillManifest:
+    return SkillManifest(
+        skill_id=DEFAULT_SKILL_ID,
+        package_version=SOURCE_INSTALL_PACKAGE_VERSION,
+        channel=DEFAULT_UPDATE_CHANNEL,
+        build_sha=SOURCE_INSTALL_BUILD_SHA,
+        repo=SOURCE_INSTALL_REPO,
+        release_tag="",
+        published_at="",
+    )
+
+
 def load_skill_manifest() -> SkillManifest:
-    manifest_path = skill_root_dir() / MANIFEST_FILE_NAME
+    root_dir = skill_root_dir()
+    manifest_path = root_dir / MANIFEST_FILE_NAME
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
+        if (root_dir / MANIFEST_TEMPLATE_FILE_NAME).exists():
+            return source_install_manifest()
         raise RuntimeError(f"skill manifest not found: {manifest_path}") from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"skill manifest is invalid json: {manifest_path}") from exc
