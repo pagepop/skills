@@ -747,6 +747,15 @@ def resolve_pagepop_web_base_url(api_base_url: str) -> str:
     return ""
 
 
+def is_local_pagepop_host(host: str) -> bool:
+    return host.strip().lower() in {
+        "127.0.0.1",
+        "localhost",
+        "127.0.0.1:11073",
+        "localhost:11073",
+    }
+
+
 def build_pagepop_project_url(api_base_url: str, conversation_id: str) -> str:
     conversation_id = conversation_id.strip()
     if not conversation_id:
@@ -1893,7 +1902,7 @@ def get_auth_status(config: Config, auth_session_id: str) -> dict[str, t.Any]:
 
 
 
-def normalize_authorize_url(_config: Config, authorize_url: str) -> str:
+def normalize_authorize_url(config: Config, authorize_url: str) -> str:
     authorize_url = authorize_url.strip()
     if not authorize_url:
         return authorize_url
@@ -1902,13 +1911,15 @@ def normalize_authorize_url(_config: Config, authorize_url: str) -> str:
     if not parsed_auth.scheme or not parsed_auth.netloc:
         return authorize_url
 
+    if is_local_pagepop_host(parsed_auth.netloc):
+        web_base_url = resolve_pagepop_web_base_url(config.api_base_url)
+        parsed_web = urllib.parse.urlparse(web_base_url)
+        if parsed_web.scheme and parsed_web.netloc and not is_local_pagepop_host(parsed_web.netloc):
+            parsed_auth = parsed_auth._replace(scheme=parsed_web.scheme, netloc=parsed_web.netloc)
+
     if parsed_auth.path == "/openclaw/authorize":
-        return urllib.parse.urlunparse(
-            parsed_auth._replace(
-                path="/openclaw/authorize-v2",
-            )
-        )
-    return authorize_url
+        parsed_auth = parsed_auth._replace(path="/openclaw/authorize-v2")
+    return urllib.parse.urlunparse(parsed_auth)
 
 
 def emit_auth_required_event(

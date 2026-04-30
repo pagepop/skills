@@ -106,6 +106,36 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(auth_required_call.kwargs["pause_execution"], True)
         self.assertEqual(auth_required_call.kwargs["resume_mode"], "rerun_same_command")
 
+    def test_normalize_authorize_url_rewrites_localhost_from_production_api(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.ai",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+        )
+
+        self.assertEqual(
+            client.normalize_authorize_url(
+                config,
+                "http://127.0.0.1:11073/openclaw/authorize-v2?session=oas-test",
+            ),
+            "https://www.pagepop.ai/openclaw/authorize-v2?session=oas-test",
+        )
+
+    def test_normalize_authorize_url_keeps_localhost_for_local_api(self) -> None:
+        config = client.Config(
+            api_base_url="http://127.0.0.1:10086",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+        )
+
+        self.assertEqual(
+            client.normalize_authorize_url(
+                config,
+                "http://127.0.0.1:11073/openclaw/authorize?session=oas-test",
+            ),
+            "http://127.0.0.1:11073/openclaw/authorize-v2?session=oas-test",
+        )
+
     def test_auth_required_emits_region_warning_when_region_context_is_missing(self) -> None:
         config = client.Config(
             api_base_url="https://pc-api.pagepop.ai",
