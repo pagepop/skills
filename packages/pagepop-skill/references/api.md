@@ -100,6 +100,8 @@ Production authorization pages use the matching PagePop web domain, for example 
 - `reason`
 - `metadata.openclaw_reason`
 
+当 `metadata.openclaw_reason` 为 `PAYMENT_REQUIRED` 时，脚本不会把它当作普通失败结束。它会保存当前 `pending_run` 和 quote 信息，输出 `payment_required`，并等待用户完成支付后重新运行同一个命令。
+
 ## 3. Skill 更新检查
 
 `GET /v1/openclaw/skill/update?skill_id=pagepop-skill&package_version=2026.04.21-r8&channel=prod`
@@ -435,6 +437,29 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
   "is_reauth": true
 }
 ```
+
+积分不足且后端创建按次付费 quote 时，会先输出：
+
+```json
+{
+  "kind": "payment_required",
+  "quote_id": "agq_123",
+  "provider": "stripe_checkout",
+  "payment_url": "https://checkout.stripe.com/pay/cs_test",
+  "status_url": "https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123",
+  "amount": "0.49",
+  "currency": "USD",
+  "estimated_units": "1",
+  "capability": "agent_request",
+  "expires_at": "2026-05-07T02:00:00Z",
+  "title": "Payment required to continue",
+  "action_text": "Open payment page",
+  "pause_execution": true,
+  "resume_mode": "rerun_same_command"
+}
+```
+
+宿主应把 `payment_url` 展示成可点击入口。用户支付后，再运行同一个 `stream` 命令且不要传新的 `--goal`；脚本会读取本地 `pending_run`，查询 quote 状态。如果还未支付，会输出 `payment_pending` 并继续暂停；如果已支付，会输出 `payment_authorized`，并用 `X-Pagepop-Billing-Authorization` 恢复 `/v2/chat` 请求。
 
 长耗时阶段，脚本还会补充用户可读的进度事件：
 

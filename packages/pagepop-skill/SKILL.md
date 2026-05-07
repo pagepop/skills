@@ -85,6 +85,9 @@ The skill emits JSON Lines. Important event kinds include:
 
 - `auth_required`
 - `auth_authorized`
+- `payment_required`
+- `payment_pending`
+- `payment_authorized`
 - `chat_context`
 - `conversation_history`
 - `chat_submitted`

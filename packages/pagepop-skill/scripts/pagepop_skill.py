@@ -75,6 +75,8 @@ MANIFEST_TEMPLATE_FILE_NAME = "skill-manifest.template.json"
 SOURCE_INSTALL_PACKAGE_VERSION = "source"
 SOURCE_INSTALL_BUILD_SHA = "source"
 SOURCE_INSTALL_REPO = "pagepop/skills"
+PAYMENT_REQUIRED_REASON = "PAYMENT_REQUIRED"
+PAYMENT_AUTHORIZATION_HEADER = "X-Pagepop-Billing-Authorization"
 
 KEY_RESET_REASONS = {
     "SKILL_KEY_INVALID",
@@ -110,6 +112,9 @@ class PagepopAPIError(RuntimeError):
 
     def should_reset_access_key(self) -> bool:
         return self.openclaw_reason in KEY_RESET_REASONS
+
+    def is_payment_required(self) -> bool:
+        return self.openclaw_reason == PAYMENT_REQUIRED_REASON
 
     def to_record(self) -> dict[str, t.Any]:
         return {
@@ -191,6 +196,20 @@ class PendingAuth:
 
 
 @dataclasses.dataclass
+class PendingPayment:
+    quote_id: str
+    provider: str = ""
+    payment_url: str = ""
+    status_url: str = ""
+    amount: str = ""
+    currency: str = ""
+    estimated_units: str = ""
+    capability: str = ""
+    expires_at: str = ""
+    created_at: str = dataclasses.field(default_factory=lambda: utc_now().isoformat())
+
+
+@dataclasses.dataclass
 class SavedConversation:
     conversation_id: str
     label: str = ""
@@ -212,6 +231,7 @@ class SkillState:
     access_key: str = ""
     pending_run: t.Optional[PendingRun] = None
     pending_auth: t.Optional[PendingAuth] = None
+    pending_payment: t.Optional[PendingPayment] = None
     active_conversation_id: str = ""
     active_conversation_updated_at: str = ""
     saved_conversations: list[SavedConversation] = dataclasses.field(default_factory=list)
@@ -239,6 +259,21 @@ class SkillState:
                 expires_at=str(pending_auth_raw.get("expires_at", "")).strip(),
                 poll_interval_seconds=int(pending_auth_raw.get("poll_interval_seconds", 3) or 3),
                 created_at=str(pending_auth_raw.get("created_at", "")).strip() or utc_now().isoformat(),
+            )
+        pending_payment_raw = raw.get("pending_payment")
+        pending_payment = None
+        if isinstance(pending_payment_raw, dict):
+            pending_payment = PendingPayment(
+                quote_id=str(pending_payment_raw.get("quote_id", "")).strip(),
+                provider=str(pending_payment_raw.get("provider", "")).strip(),
+                payment_url=str(pending_payment_raw.get("payment_url", "")).strip(),
+                status_url=str(pending_payment_raw.get("status_url", "")).strip(),
+                amount=str(pending_payment_raw.get("amount", "")).strip(),
+                currency=str(pending_payment_raw.get("currency", "")).strip(),
+                estimated_units=str(pending_payment_raw.get("estimated_units", "")).strip(),
+                capability=str(pending_payment_raw.get("capability", "")).strip(),
+                expires_at=str(pending_payment_raw.get("expires_at", "")).strip(),
+                created_at=str(pending_payment_raw.get("created_at", "")).strip() or utc_now().isoformat(),
             )
         saved_conversations: list[SavedConversation] = []
         saved_raw = raw.get("saved_conversations")
@@ -283,6 +318,7 @@ class SkillState:
             access_key=str(raw.get("access_key", "")).strip(),
             pending_run=pending_run,
             pending_auth=pending_auth if pending_auth and pending_auth.auth_session_id else None,
+            pending_payment=pending_payment if pending_payment and pending_payment.quote_id else None,
             active_conversation_id=str(raw.get("active_conversation_id", "")).strip(),
             active_conversation_updated_at=str(raw.get("active_conversation_updated_at", "")).strip(),
             saved_conversations=saved_conversations,
@@ -299,6 +335,8 @@ class SkillState:
             payload["pending_run"] = dataclasses.asdict(self.pending_run)
         if self.pending_auth is not None:
             payload["pending_auth"] = dataclasses.asdict(self.pending_auth)
+        if self.pending_payment is not None:
+            payload["pending_payment"] = dataclasses.asdict(self.pending_payment)
         if self.active_conversation_id:
             payload["active_conversation_id"] = self.active_conversation_id
         if self.active_conversation_updated_at:
@@ -1901,6 +1939,71 @@ def get_auth_status(config: Config, auth_session_id: str) -> dict[str, t.Any]:
     return http_json("GET", f"{config.api_base_url}/v1/openclaw/auth/status?{params}")
 
 
+def build_quote_status_url(config: Config, quote_id: str) -> str:
+    return f"{config.api_base_url}/api/agent-billing/v1/quotes/{urllib.parse.quote(quote_id)}"
+
+
+def get_quote_status(config: Config, pending_payment: PendingPayment) -> dict[str, t.Any]:
+    status_url = pending_payment.status_url or build_quote_status_url(config, pending_payment.quote_id)
+    return http_json("GET", status_url)
+
+
+def pending_payment_from_api_error(config: Config, exc: PagepopAPIError) -> PendingPayment:
+    metadata = exc.metadata
+    quote_id = str(metadata.get("quote_id", "")).strip()
+    status_url = str(metadata.get("status_url", "")).strip()
+    if quote_id and not status_url:
+        status_url = build_quote_status_url(config, quote_id)
+    return PendingPayment(
+        quote_id=quote_id,
+        provider=str(metadata.get("provider", "")).strip(),
+        payment_url=str(metadata.get("payment_url", "")).strip(),
+        status_url=status_url,
+        amount=str(metadata.get("amount", "")).strip(),
+        currency=str(metadata.get("currency", "")).strip(),
+        estimated_units=str(metadata.get("estimated_units", "")).strip(),
+        capability=str(metadata.get("capability", "")).strip(),
+        expires_at=str(metadata.get("expires_at", "")).strip(),
+    )
+
+
+def emit_payment_required_event(pending_payment: PendingPayment, exc: PagepopAPIError) -> None:
+    emit_event(
+        "payment_required",
+        quote_id=pending_payment.quote_id,
+        provider=pending_payment.provider,
+        payment_url=pending_payment.payment_url,
+        status_url=pending_payment.status_url,
+        amount=pending_payment.amount,
+        currency=pending_payment.currency,
+        estimated_units=pending_payment.estimated_units,
+        capability=pending_payment.capability,
+        expires_at=pending_payment.expires_at,
+        title="Payment required to continue",
+        message="Open the payment link, complete checkout, then run the same PagePop command again.",
+        backend_message=exc.message,
+        action_text="Open payment page",
+        result_hint="After payment succeeds, rerun this PagePop command without changing the request.",
+        pause_execution=True,
+        resume_mode="rerun_same_command",
+    )
+
+
+def emit_payment_pending_event(pending_payment: PendingPayment, status: str) -> None:
+    emit_event(
+        "payment_pending",
+        quote_id=pending_payment.quote_id,
+        provider=pending_payment.provider,
+        payment_url=pending_payment.payment_url,
+        status_url=pending_payment.status_url,
+        status=status or "pending",
+        title="Payment is not confirmed yet",
+        message="Open the payment link and complete checkout, then run the same PagePop command again.",
+        action_text="Open payment page",
+        pause_execution=True,
+        resume_mode="rerun_same_command",
+    )
+
 
 def normalize_authorize_url(config: Config, authorize_url: str) -> str:
     authorize_url = authorize_url.strip()
@@ -1993,6 +2096,7 @@ def submit_chat(
     artifact_type: str,
     links: list[str],
     conversation_id: str = "",
+    billing_authorization_id: str = "",
 ) -> dict[str, t.Any]:
     payload: dict[str, t.Any] = {
         "conversation_id": conversation_id,
@@ -2009,10 +2113,13 @@ def submit_chat(
     }
     if config.timezone:
         payload["timezone"] = config.timezone
+    headers = request_auth_headers(config, state)
+    if billing_authorization_id.strip():
+        headers[PAYMENT_AUTHORIZATION_HEADER] = billing_authorization_id.strip()
     return http_json(
         "POST",
         f"{config.api_base_url}/v2/chat",
-        headers=request_auth_headers(config, state),
+        headers=headers,
         payload=payload,
     )
 
@@ -2467,6 +2574,7 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
         else:
             emit_event("chat_context", **build_chat_context_payload(mode="new", state=state))
         state.pending_run = pending_run
+        state.pending_payment = None
         save_state(config.state_path, state)
         emit_event("pending_run_saved", pending_run=dataclasses.asdict(pending_run))
 
@@ -2475,6 +2583,23 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
             state = ensure_authorized(config, state)
 
         try:
+            billing_authorization_id = ""
+            if state.pending_payment is not None:
+                quote_status = get_quote_status(config, state.pending_payment)
+                status = str(quote_status.get("status", "")).strip()
+                authorization_id = str(quote_status.get("authorization_id", "")).strip()
+                if status == "paid" and authorization_id:
+                    billing_authorization_id = authorization_id
+                    emit_event(
+                        "payment_authorized",
+                        quote_id=state.pending_payment.quote_id,
+                        status=status,
+                        authorization_id=mask_secret(authorization_id),
+                    )
+                else:
+                    emit_payment_pending_event(state.pending_payment, status)
+                    save_state(config.state_path, state)
+                    return 0
             chat_data = submit_chat(
                 config,
                 state,
@@ -2482,6 +2607,7 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
                 artifact_type=pending_run.artifact_type,
                 links=pending_run.links,
                 conversation_id=pending_run.conversation_id,
+                billing_authorization_id=billing_authorization_id,
             )
             conversation_id = str(chat_data.get("conversation_id", "")).strip()
             if not conversation_id:
@@ -2519,6 +2645,7 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
                 terminal_command=result.terminal_command,
             )
             state.pending_run = None
+            state.pending_payment = None
             save_state(config.state_path, state)
             emit_event(
                 "stream_finished",
@@ -2528,6 +2655,15 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
             )
             return 0
         except PagepopAPIError as exc:
+            if exc.is_payment_required():
+                pending_payment = pending_payment_from_api_error(config, exc)
+                if not pending_payment.quote_id:
+                    raise RuntimeError("payment required response missing quote_id") from exc
+                state.pending_run = pending_run
+                state.pending_payment = pending_payment
+                save_state(config.state_path, state)
+                emit_payment_required_event(pending_payment, exc)
+                return 0
             if auth_attempt == 0 and exc.should_reset_access_key():
                 _reset_access_key_and_emit(config, state, exc)
                 continue

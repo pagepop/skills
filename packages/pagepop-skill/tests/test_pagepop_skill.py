@@ -1148,6 +1148,27 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(ctx.exception.openclaw_reason, "SKILL_KEY_EXPIRED")
         self.assertTrue(ctx.exception.should_reset_access_key())
 
+    def test_submit_chat_sends_billing_authorization_header(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.cn",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+        )
+        state = client.SkillState(access_key="pp_sk_existing")
+
+        with mock.patch.object(client, "http_json", return_value={"conversation_id": "conv-1"}) as http_json:
+            client.submit_chat(
+                config,
+                state,
+                goal="make an image",
+                artifact_type="auto",
+                links=[],
+                billing_authorization_id="aga_paid",
+            )
+
+        headers = http_json.call_args.kwargs["headers"]
+        self.assertEqual(headers["X-Pagepop-Billing-Authorization"], "aga_paid")
+
     def test_http_json_reports_non_json_http_error_preview(self) -> None:
         error = urllib.error.HTTPError(
             url="https://example.com/v2/chat",
@@ -1333,6 +1354,137 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(loaded.conversation_streams["conv-1"].cursor_offset, 12)
             self.assertEqual(loaded.conversation_streams["conv-1"].last_done_offset, 10)
             self.assertEqual(loaded.conversation_streams["conv-1"].last_terminal_command, "done")
+
+    def test_payment_required_state_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            state = client.SkillState(
+                access_key="pp_sk_existing",
+                pending_run=client.PendingRun(goal="make an image", artifact_type="auto"),
+                pending_payment=client.PendingPayment(
+                    quote_id="agq_123",
+                    provider="stripe_checkout",
+                    payment_url="https://checkout.stripe.com/pay/cs_test",
+                    status_url="https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123",
+                    amount="0.49",
+                    currency="USD",
+                    estimated_units="1",
+                    capability="agent_request",
+                    expires_at="2026-05-07T02:00:00Z",
+                ),
+            )
+            client.save_state(state_path, state)
+
+            loaded = client.load_state(state_path)
+
+            self.assertIsNotNone(loaded.pending_payment)
+            assert loaded.pending_payment is not None
+            self.assertEqual(loaded.pending_payment.quote_id, "agq_123")
+            self.assertEqual(loaded.pending_payment.payment_url, "https://checkout.stripe.com/pay/cs_test")
+            self.assertEqual(loaded.pending_payment.status_url, "https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123")
+
+    def test_stream_command_emits_payment_required_and_saves_pending_payment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(state_path, client.SkillState(access_key="pp_sk_existing"))
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.ai",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                goal="make an image",
+                artifact_type="auto",
+                link=[],
+                conversation_id="",
+                resume_conversation_id="",
+                new_conversation=False,
+            )
+            api_error = client.PagepopAPIError(
+                code=703000001,
+                message="Payment is required",
+                reason="AGENT_BILLING_PAYMENT_REQUIRED",
+                metadata={
+                    "openclaw_reason": "PAYMENT_REQUIRED",
+                    "quote_id": "agq_123",
+                    "provider": "stripe_checkout",
+                    "payment_url": "https://checkout.stripe.com/pay/cs_test",
+                    "status_url": "https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123",
+                    "amount": "0.49",
+                    "currency": "USD",
+                    "estimated_units": "1",
+                    "capability": "agent_request",
+                    "expires_at": "2026-05-07T02:00:00Z",
+                },
+            )
+
+            with mock.patch.object(client, "submit_chat", side_effect=api_error), mock.patch.object(
+                client,
+                "emit_event",
+            ) as emit_event, mock.patch.object(client, "emit_record"):
+                exit_code = client.run_stream_command(config, args)
+
+            self.assertEqual(exit_code, 0)
+            saved = client.load_state(state_path)
+            self.assertIsNotNone(saved.pending_payment)
+            assert saved.pending_payment is not None
+            self.assertEqual(saved.pending_payment.quote_id, "agq_123")
+            payment_calls = [call for call in emit_event.call_args_list if call.args[0] == "payment_required"]
+            self.assertEqual(len(payment_calls), 1)
+            self.assertEqual(payment_calls[0].kwargs["payment_url"], "https://checkout.stripe.com/pay/cs_test")
+            self.assertTrue(payment_calls[0].kwargs["pause_execution"])
+
+    def test_stream_command_resumes_paid_pending_payment_with_authorization_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(
+                state_path,
+                client.SkillState(
+                    access_key="pp_sk_existing",
+                    pending_run=client.PendingRun(goal="make an image", artifact_type="auto"),
+                    pending_payment=client.PendingPayment(
+                        quote_id="agq_123",
+                        provider="stripe_checkout",
+                        payment_url="https://checkout.stripe.com/pay/cs_test",
+                        status_url="https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123",
+                    ),
+                ),
+            )
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.ai",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                goal="",
+                artifact_type="auto",
+                link=[],
+                conversation_id="",
+                resume_conversation_id="",
+                new_conversation=False,
+            )
+            captured_authorizations: list[str] = []
+
+            def fake_submit_chat(*_args, billing_authorization_id: str = "", **_kwargs):
+                captured_authorizations.append(billing_authorization_id)
+                return {"conversation_id": "conv-paid", "sse_max_offset": 0}
+
+            with mock.patch.object(
+                client,
+                "get_quote_status",
+                return_value={"status": "paid", "authorization_id": "aga_paid"},
+            ), mock.patch.object(client, "submit_chat", side_effect=fake_submit_chat), mock.patch.object(
+                client,
+                "stream_sse_events",
+                return_value=client.StreamResult(conversation_id="conv-paid", terminal_command="done", last_offset=1),
+            ), mock.patch.object(client, "emit_event"), mock.patch.object(client, "emit_record"):
+                exit_code = client.run_stream_command(config, args)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(captured_authorizations, ["aga_paid"])
+            saved = client.load_state(state_path)
+            self.assertIsNone(saved.pending_run)
+            self.assertIsNone(saved.pending_payment)
 
 
 if __name__ == "__main__":
