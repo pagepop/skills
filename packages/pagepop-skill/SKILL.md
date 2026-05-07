@@ -27,6 +27,7 @@ python3 scripts/pagepop_skill.py auth
 python3 scripts/pagepop_skill.py conversations
 python3 scripts/pagepop_skill.py stream --goal "Create a product launch deck"
 python3 scripts/pagepop_skill.py stream --new-chat --goal "Create a rednote post about camping gear"
+python3 scripts/pagepop_skill.py stream --billing-session-id ags_xxx
 python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx --offset 0
 ```
 
@@ -78,6 +79,20 @@ Artifact delivery events include:
 Hosts should prefer their matching `channel_presentations` entry, then fall back to `presentation.fallback_text`.
 Feishu hosts should avoid rendering raw URLs from generic `presentation`; use the Feishu card buttons or Feishu-specific fallback text so underscores in URLs are not truncated by lark_md auto-linking.
 When composing a Feishu chat message manually, send `channel_presentations.feishu.media.local_image_messages` as image messages first, then send `channel_presentations.feishu.plain_text` or `artifact.display_text`; do not copy raw image URLs from `artifact.text` or `sse_event.data` into `lark_md`.
+
+## Paid Session Flow
+
+When `/v2/chat` returns `metadata.openclaw_reason=payment_offer_required`, pause the run and show the emitted `payment_required` event to the user. The event includes `offer_set_id`, parsed `options`, `provider`, `create_quote_endpoint`, `quote_status_url_prefix`, `custom_units_allowed`, and `expires_at`.
+
+The user agent should:
+
+1. Show the preset options and, when `custom_units_allowed` is true, allow a custom image count.
+2. Create a quote with `POST /api/agent-billing/v1/quotes` using `{ "offer_set_id": "...", "selected_option_id": "...", "requested_image_units": 5 }`.
+3. Open or display the returned `payment_url`.
+4. Poll `GET /api/agent-billing/v1/quotes/{quote_id}` until `status` is `paid`.
+5. Retry the saved PagePop request with `--billing-session-id <session_id>`, or call the chat helper with `billing_session_id`.
+
+The paid session is consumed by the first real `/v2/chat` execution and ends with that run's first `finish_work`. Do not reuse the same `session_id` across later user turns. The legacy `X-Pagepop-Billing-Authorization` path is still accepted for older quotes, but new integrations should prefer `X-Pagepop-Billing-Session`.
 
 ## Output
 

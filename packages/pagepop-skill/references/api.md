@@ -100,7 +100,7 @@ Production authorization pages use the matching PagePop web domain, for example 
 - `reason`
 - `metadata.openclaw_reason`
 
-当 `metadata.openclaw_reason` 为 `PAYMENT_REQUIRED` 时，脚本不会把它当作普通失败结束。它会保存当前 `pending_run` 和 quote 信息，输出 `payment_required`，并等待用户完成支付后重新运行同一个命令。
+当 `metadata.openclaw_reason` 为 `payment_offer_required` 时，脚本不会把它当作普通失败结束。它会保存当前 `pending_run` 和 offer 信息，输出 `payment_required`，等待用户选择付费档位、创建 quote、完成支付后，用 paid session 重新运行同一个命令。旧的 `PAYMENT_REQUIRED` quote/authorization 流程仍作为兼容路径保留。
 
 ## 3. Skill 更新检查
 
@@ -164,6 +164,8 @@ SSE offset 是当前服务端队列缓存内的 cursor，不是 conversation 维
 - `X-Pagepop-Skill-Key`
 - `X-Pagepop-Skill-Id`
 - `X-Pagepop-Client: openclaw`
+- `X-Pagepop-Billing-Session: ags_xxx`，仅在 paid session 已支付后重试第一轮真正执行时发送
+- `X-Pagepop-Billing-Authorization: aga_xxx`，旧 quote 兼容路径，新接入优先使用 paid session
 
 请求体：
 
@@ -195,7 +197,102 @@ SSE offset 是当前服务端队列缓存内的 cursor，不是 conversation 维
 }
 ```
 
-## 5. SSE 拉流
+如果积分不足且后端需要用户选择付费档位，错误响应会带 `metadata.openclaw_reason=payment_offer_required`。用户 agent 不需要传价格、预算或内部约束，只需要把用户选择转换为 quote 请求，然后用支付成功返回的 session 重试 chat。
+
+示例错误 metadata：
+
+```json
+{
+  "openclaw_reason": "payment_offer_required",
+  "offer_set_id": "agos_123",
+  "options": "[{\"option_id\":\"opt_3\",\"image_soft_limit\":3,\"amount_cents\":499,\"currency\":\"CNY\"}]",
+  "provider": "alipay",
+  "create_quote_endpoint": "/api/agent-billing/v1/quotes",
+  "quote_status_url_prefix": "/api/agent-billing/v1/quotes/",
+  "custom_units_allowed": true,
+  "expires_at": "2026-05-07T02:00:00Z"
+}
+```
+
+用户 agent 流程：
+
+1. 展示 `options` 中的档位；如果 `custom_units_allowed=true`，也可以让用户输入自定义图片数。
+2. 调用 `POST /api/agent-billing/v1/quotes` 创建 quote。
+3. 引导用户打开返回的 `payment_url` 完成支付。
+4. 轮询 `GET /api/agent-billing/v1/quotes/{quote_id}`。
+5. `status=paid` 后，拿 `session_id` 重试原来的 `/v2/chat`，请求头带 `X-Pagepop-Billing-Session: <session_id>`。
+
+paid session 只用于该次支付对应的第一轮真正 `/v2/chat` 执行。后端会绑定本轮并注入 hidden prompt；skill/用户 agent 不要跨多轮复用同一个 `session_id`。这轮第一次 `finish_work` 后 session 即结束。
+
+## 5. 创建付费 Quote
+
+`POST /api/agent-billing/v1/quotes`
+
+请求头与 chat 的基础授权头相同。
+
+请求体：
+
+```json
+{
+  "offer_set_id": "agos_123",
+  "selected_option_id": "opt_3",
+  "requested_image_units": 3
+}
+```
+
+使用预设档位时传 `selected_option_id`。使用自定义图片数时传 `requested_image_units`；如果同时传两者，后端以实际策略校验。
+
+成功：
+
+```json
+{
+  "code": 1000,
+  "data": {
+    "quote_id": "agq_123",
+    "provider": "alipay",
+    "payment_url": "https://www.pagepop.cn/pay/agq_123",
+    "currency": "CNY",
+    "amount_cents": 499,
+    "image_soft_limit": 3,
+    "expires_at": "2026-05-07T02:10:00Z"
+  }
+}
+```
+
+## 6. 查询 Quote 状态
+
+`GET /api/agent-billing/v1/quotes/{quote_id}`
+
+处理中：
+
+```json
+{
+  "code": 1000,
+  "data": {
+    "quote_id": "agq_123",
+    "status": "pending",
+    "provider": "alipay",
+    "payment_url": "https://www.pagepop.cn/pay/agq_123",
+    "expires_at": "2026-05-07T02:10:00Z"
+  }
+}
+```
+
+支付成功：
+
+```json
+{
+  "code": 1000,
+  "data": {
+    "quote_id": "agq_123",
+    "status": "paid",
+    "session_id": "ags_123",
+    "image_soft_limit": 3
+  }
+}
+```
+
+## 7. SSE 拉流
 
 `GET /v2/sse/events?conversation_id=conv_xxx&offset=0`
 
@@ -228,7 +325,7 @@ data: {"conversation_id":"conv_xxx","cmd":"done","offset":12}
 - `paused`
 - `cancled`
 
-## 6. 本地透传格式
+## 8. 本地透传格式
 
 首次使用未授权时，脚本会先输出：
 
@@ -438,28 +535,49 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
 }
 ```
 
-积分不足且后端创建按次付费 quote 时，会先输出：
+积分不足且后端返回 paid session offer 时，会先输出：
 
 ```json
 {
   "kind": "payment_required",
-  "quote_id": "agq_123",
-  "provider": "stripe_checkout",
-  "payment_url": "https://checkout.stripe.com/pay/cs_test",
-  "status_url": "https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123",
-  "amount": "0.49",
-  "currency": "USD",
-  "estimated_units": "1",
-  "capability": "agent_request",
+  "quote_id": "",
+  "provider": "alipay",
+  "payment_url": "",
+  "status_url": "",
+  "amount": "",
+  "currency": "",
+  "estimated_units": "",
+  "capability": "",
+  "offer_set_id": "agos_123",
+  "options": [
+    {
+      "option_id": "opt_3",
+      "image_soft_limit": 3,
+      "amount_cents": 499,
+      "currency": "CNY"
+    }
+  ],
+  "quote_endpoint": "/api/agent-billing/v1/quotes",
+  "quote_status_endpoint": "/api/agent-billing/v1/quotes/",
+  "create_quote_endpoint": "/api/agent-billing/v1/quotes",
+  "quote_status_url_prefix": "/api/agent-billing/v1/quotes/",
+  "custom_units_allowed": true,
   "expires_at": "2026-05-07T02:00:00Z",
   "title": "Payment required to continue",
-  "action_text": "Open payment page",
+  "message": "Choose a paid image option, create a quote, open the payment link, then retry this PagePop command with the paid session id.",
+  "action_text": "Choose payment option",
   "pause_execution": true,
   "resume_mode": "rerun_same_command"
 }
 ```
 
-宿主应把 `payment_url` 展示成可点击入口。用户支付后，再运行同一个 `stream` 命令且不要传新的 `--goal`；脚本会读取本地 `pending_run`，查询 quote 状态。如果还未支付，会输出 `payment_pending` 并继续暂停；如果已支付，会输出 `payment_authorized`，并用 `X-Pagepop-Billing-Authorization` 恢复 `/v2/chat` 请求。
+宿主或用户 agent 应展示 `options`，收集用户选择或自定义图片数，然后创建 quote。用户支付后，轮询 quote status；如果还未支付，继续提示支付；如果已支付，使用返回的 `session_id` 运行：
+
+```bash
+python3 scripts/pagepop_skill.py stream --billing-session-id ags_xxx
+```
+
+不要传新的 `--goal`，脚本会读取本地 `pending_run`，并用 `X-Pagepop-Billing-Session` 恢复 `/v2/chat` 请求。旧版后端如果已经返回 `quote_id/payment_url/status_url`，脚本仍会查询 quote status，并用旧的 `X-Pagepop-Billing-Authorization` 兼容恢复。
 
 长耗时阶段，脚本还会补充用户可读的进度事件：
 
