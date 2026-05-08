@@ -1386,6 +1386,48 @@ class PagepopSkillTests(unittest.TestCase):
             headers=client.auth_headers("pp_sk_existing", "pagepop-skill"),
         )
 
+    def test_get_quote_status_expands_relative_status_url(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.ai",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+        )
+        state = client.SkillState(access_key="pp_sk_existing")
+        pending_payment = client.PendingPayment(
+            quote_id="agq_123",
+            status_url="/api/agent-billing/v1/quotes/agq_123",
+        )
+
+        with mock.patch.object(client, "http_json", return_value={"status": "paid"}) as http_json:
+            self.assertEqual(client.get_quote_status(config, pending_payment, state), {"status": "paid"})
+
+        http_json.assert_called_once_with(
+            "GET",
+            "https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123",
+            headers=client.auth_headers("pp_sk_existing", "pagepop-skill"),
+        )
+
+    def test_pending_payment_from_api_error_expands_relative_status_url(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.ai",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+        )
+        exc = client.PagepopAPIError(
+            code=703000001,
+            message="payment required",
+            reason="AGENT_BILLING_PAYMENT_REQUIRED",
+            metadata={
+                "openclaw_reason": "PAYMENT_REQUIRED",
+                "quote_id": "agq_123",
+                "status_url": "/api/agent-billing/v1/quotes/agq_123",
+            },
+        )
+
+        pending = client.pending_payment_from_api_error(config, exc)
+
+        self.assertEqual(pending.status_url, "https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123")
+
     def test_stream_command_rejects_billing_session_for_fresh_goal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = pathlib.Path(tmpdir) / "state.json"

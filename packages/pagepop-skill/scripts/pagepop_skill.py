@@ -1975,6 +1975,18 @@ def build_quote_status_url(config: Config, quote_id: str) -> str:
     return f"{config.api_base_url}/api/agent-billing/v1/quotes/{urllib.parse.quote(quote_id)}"
 
 
+def resolve_api_url(config: Config, url: str) -> str:
+    value = url.strip()
+    if not value:
+        return value
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme and parsed.netloc:
+        return value
+    if value.startswith("/"):
+        return config.api_base_url.rstrip("/") + value
+    return config.api_base_url.rstrip("/") + "/" + value
+
+
 def create_quote(
     config: Config,
     state: SkillState,
@@ -2005,6 +2017,7 @@ def get_quote_status(
         status_url = build_quote_status_url(config, pending_payment)
     else:
         status_url = pending_payment.status_url or build_quote_status_url(config, pending_payment.quote_id)
+    status_url = resolve_api_url(config, status_url)
     return http_json("GET", status_url, headers=request_auth_headers(config, state))
 
 
@@ -2123,6 +2136,8 @@ def pending_payment_from_api_error(config: Config, exc: PagepopAPIError) -> Pend
     status_url = str(metadata.get("status_url", "")).strip()
     if quote_id and not status_url:
         status_url = build_quote_status_url(config, quote_id)
+    elif status_url:
+        status_url = resolve_api_url(config, status_url)
     create_quote_endpoint = str(
         metadata.get("create_quote_endpoint") or metadata.get("quote_endpoint") or ""
     ).strip()
