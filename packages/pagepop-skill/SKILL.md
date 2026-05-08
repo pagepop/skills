@@ -27,6 +27,8 @@ python3 scripts/pagepop_skill.py auth
 python3 scripts/pagepop_skill.py conversations
 python3 scripts/pagepop_skill.py stream --goal "Create a product launch deck"
 python3 scripts/pagepop_skill.py stream --new-chat --goal "Create a rednote post about camping gear"
+python3 scripts/pagepop_skill.py create-quote --selected-option-id standard
+python3 scripts/pagepop_skill.py quote-status
 python3 scripts/pagepop_skill.py stream --billing-session-id ags_xxx
 python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx --offset 0
 ```
@@ -87,10 +89,10 @@ When `/v2/chat` returns `metadata.openclaw_reason=payment_offer_required`, pause
 The user agent should:
 
 1. Show the preset options and, when `custom_units_allowed` is true, allow a custom image count.
-2. Create a quote with `POST /api/agent-billing/v1/quotes` using `{ "offer_set_id": "...", "selected_option_id": "...", "requested_image_units": 5 }`.
+2. Create a quote with `create-quote --selected-option-id <option_id>` or `create-quote --requested-image-units <count>`. Advanced hosts may call `POST /api/agent-billing/v1/quotes` directly with `{ "offer_set_id": "...", "selected_option_id": "...", "requested_image_units": 5 }`.
 3. Open or display the returned `payment_url`.
-4. Poll `GET /api/agent-billing/v1/quotes/{quote_id}` until `status` is `paid`.
-5. Retry the saved PagePop request with `--billing-session-id <session_id>`, or call the chat helper with `billing_session_id`.
+4. Run `quote-status` until `status` is `paid`. Advanced hosts may poll `GET /api/agent-billing/v1/quotes/{quote_id}` directly.
+5. Retry the saved PagePop request by running `stream` without a new `--goal`; if the host stores the paid session itself, it may pass `--billing-session-id <session_id>`.
 
 The paid session is consumed by the first real `/v2/chat` execution and ends with that run's first `finish_work`. Do not reuse the same `session_id` across later user turns. The legacy `X-Pagepop-Billing-Authorization` path is still accepted for older quotes, but new integrations should prefer `X-Pagepop-Billing-Session`.
 

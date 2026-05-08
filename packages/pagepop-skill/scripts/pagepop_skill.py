@@ -215,6 +215,8 @@ class PendingPayment:
     quote_status_url_prefix: str = ""
     custom_units_allowed: bool = False
     expires_at: str = ""
+    session_id: str = ""
+    authorization_id: str = ""
     created_at: str = dataclasses.field(default_factory=lambda: utc_now().isoformat())
 
 
@@ -301,6 +303,8 @@ class SkillState:
                 quote_status_url_prefix=quote_status_url_prefix,
                 custom_units_allowed=parse_bool(pending_payment_raw.get("custom_units_allowed", False)),
                 expires_at=str(pending_payment_raw.get("expires_at", "")).strip(),
+                session_id=str(pending_payment_raw.get("session_id", "")).strip(),
+                authorization_id=str(pending_payment_raw.get("authorization_id", "")).strip(),
                 created_at=str(pending_payment_raw.get("created_at", "")).strip() or utc_now().isoformat(),
             )
         saved_conversations: list[SavedConversation] = []
@@ -2022,6 +2026,97 @@ def parse_bool(value: t.Any) -> bool:
     return bool(value)
 
 
+def first_nonempty_string(raw: dict[str, t.Any], *keys: str) -> str:
+    for key in keys:
+        value = raw.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def pending_payment_from_quote_response(
+    config: Config,
+    quote_data: dict[str, t.Any],
+    existing: t.Optional[PendingPayment] = None,
+) -> PendingPayment:
+    previous = existing or PendingPayment()
+    quote_id = first_nonempty_string(quote_data, "quote_id", "quoteId") or previous.quote_id
+    status_url = previous.status_url
+    if quote_id:
+        status_url = build_quote_status_url(config, quote_id)
+    return PendingPayment(
+        quote_id=quote_id,
+        provider=first_nonempty_string(quote_data, "provider") or previous.provider,
+        payment_url=first_nonempty_string(quote_data, "payment_url", "paymentUrl") or previous.payment_url,
+        status_url=status_url,
+        amount=first_nonempty_string(quote_data, "amount", "amount_cents", "amountCents") or previous.amount,
+        currency=first_nonempty_string(quote_data, "currency") or previous.currency,
+        estimated_units=first_nonempty_string(
+            quote_data,
+            "estimated_units",
+            "estimatedUnits",
+            "image_soft_limit",
+            "imageSoftLimit",
+        )
+        or previous.estimated_units,
+        capability=first_nonempty_string(quote_data, "capability") or previous.capability,
+        offer_set_id=previous.offer_set_id,
+        options=previous.options,
+        quote_endpoint=previous.quote_endpoint,
+        quote_status_endpoint=previous.quote_status_endpoint,
+        create_quote_endpoint=previous.create_quote_endpoint,
+        quote_status_url_prefix=previous.quote_status_url_prefix,
+        custom_units_allowed=previous.custom_units_allowed,
+        expires_at=first_nonempty_string(quote_data, "expires_at", "expiresAt") or previous.expires_at,
+        session_id=previous.session_id,
+        authorization_id=previous.authorization_id,
+        created_at=previous.created_at,
+    )
+
+
+def pending_payment_from_status_response(
+    config: Config,
+    pending_payment: PendingPayment,
+    status_data: dict[str, t.Any],
+) -> PendingPayment:
+    quote_id = first_nonempty_string(status_data, "quote_id", "quoteId") or pending_payment.quote_id
+    status_url = pending_payment.status_url
+    if quote_id and not status_url:
+        status_url = build_quote_status_url(config, quote_id)
+    return PendingPayment(
+        quote_id=quote_id,
+        provider=first_nonempty_string(status_data, "provider") or pending_payment.provider,
+        payment_url=pending_payment.payment_url,
+        status_url=status_url,
+        amount=pending_payment.amount,
+        currency=pending_payment.currency,
+        estimated_units=first_nonempty_string(
+            status_data,
+            "estimated_units",
+            "estimatedUnits",
+            "image_soft_limit",
+            "imageSoftLimit",
+        )
+        or pending_payment.estimated_units,
+        capability=pending_payment.capability,
+        offer_set_id=pending_payment.offer_set_id,
+        options=pending_payment.options,
+        quote_endpoint=pending_payment.quote_endpoint,
+        quote_status_endpoint=pending_payment.quote_status_endpoint,
+        create_quote_endpoint=pending_payment.create_quote_endpoint,
+        quote_status_url_prefix=pending_payment.quote_status_url_prefix,
+        custom_units_allowed=pending_payment.custom_units_allowed,
+        expires_at=first_nonempty_string(status_data, "expires_at", "expiresAt") or pending_payment.expires_at,
+        session_id=first_nonempty_string(status_data, "session_id", "sessionId") or pending_payment.session_id,
+        authorization_id=first_nonempty_string(status_data, "authorization_id", "authorizationId")
+        or pending_payment.authorization_id,
+        created_at=pending_payment.created_at,
+    )
+
+
 def pending_payment_from_api_error(config: Config, exc: PagepopAPIError) -> PendingPayment:
     metadata = exc.metadata
     quote_id = str(metadata.get("quote_id", "")).strip()
@@ -2106,6 +2201,55 @@ def emit_payment_pending_event(pending_payment: PendingPayment, status: str) -> 
         pause_execution=True,
         resume_mode="rerun_same_command",
     )
+
+
+def emit_quote_payment_required_event(pending_payment: PendingPayment) -> None:
+    emit_event(
+        "payment_required",
+        quote_id=pending_payment.quote_id,
+        provider=pending_payment.provider,
+        payment_url=pending_payment.payment_url,
+        status_url=pending_payment.status_url,
+        amount=pending_payment.amount,
+        currency=pending_payment.currency,
+        estimated_units=pending_payment.estimated_units,
+        capability=pending_payment.capability,
+        offer_set_id=pending_payment.offer_set_id,
+        options=pending_payment.options,
+        quote_endpoint=pending_payment.quote_endpoint,
+        quote_status_endpoint=pending_payment.quote_status_endpoint,
+        create_quote_endpoint=pending_payment.create_quote_endpoint,
+        quote_status_url_prefix=pending_payment.quote_status_url_prefix,
+        custom_units_allowed=pending_payment.custom_units_allowed,
+        expires_at=pending_payment.expires_at,
+        title="Payment required to continue",
+        message="Open the payment link, complete checkout, then retry this PagePop command.",
+        action_text="Open payment page",
+        result_hint="After payment succeeds, run quote-status or rerun stream without --goal.",
+        pause_execution=True,
+        resume_mode="rerun_same_command",
+    )
+
+
+def emit_payment_authorized_event(pending_payment: PendingPayment, *, status: str = "paid") -> None:
+    if pending_payment.session_id:
+        emit_event(
+            "payment_authorized",
+            quote_id=pending_payment.quote_id,
+            status=status,
+            session_id=mask_secret(pending_payment.session_id),
+            image_soft_limit=pending_payment.estimated_units or None,
+            result_hint="Rerun the saved PagePop request without --goal, or pass --billing-session-id explicitly.",
+        )
+        return
+    if pending_payment.authorization_id:
+        emit_event(
+            "payment_authorized",
+            quote_id=pending_payment.quote_id,
+            status=status,
+            authorization_id=mask_secret(pending_payment.authorization_id),
+            result_hint="Rerun the saved PagePop request without --goal.",
+        )
 
 
 def normalize_authorize_url(config: Config, authorize_url: str) -> str:
@@ -2696,17 +2840,27 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
             billing_session_id = billing_session_id_arg
             if state.pending_payment is not None:
                 if billing_session_id:
+                    state.pending_payment.session_id = billing_session_id
+                    save_state(config.state_path, state)
                     emit_event(
                         "payment_authorized",
                         quote_id=state.pending_payment.quote_id,
                         status="paid",
                         session_id=mask_secret(billing_session_id),
                     )
+                elif state.pending_payment.session_id:
+                    billing_session_id = state.pending_payment.session_id
+                    emit_payment_authorized_event(state.pending_payment)
+                elif state.pending_payment.authorization_id:
+                    billing_authorization_id = state.pending_payment.authorization_id
+                    emit_payment_authorized_event(state.pending_payment)
                 elif state.pending_payment.quote_id:
                     quote_status = get_quote_status(config, state.pending_payment, state)
                     status = str(quote_status.get("status", "")).strip()
-                    session_id = str(quote_status.get("session_id", "")).strip()
-                    authorization_id = str(quote_status.get("authorization_id", "")).strip()
+                    state.pending_payment = pending_payment_from_status_response(config, state.pending_payment, quote_status)
+                    save_state(config.state_path, state)
+                    session_id = state.pending_payment.session_id
+                    authorization_id = state.pending_payment.authorization_id
                     if status == "paid" and session_id:
                         billing_session_id = session_id
                         emit_event(
@@ -2714,7 +2868,7 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
                             quote_id=state.pending_payment.quote_id,
                             status=status,
                             session_id=mask_secret(session_id),
-                            image_soft_limit=quote_status.get("image_soft_limit"),
+                            image_soft_limit=quote_status.get("image_soft_limit") or state.pending_payment.estimated_units,
                         )
                     elif status == "paid" and authorization_id:
                         billing_authorization_id = authorization_id
@@ -2750,7 +2904,7 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
                         title="Payment required to continue",
                         message="Choose a paid image option, create and pay a quote, then retry with --billing-session-id.",
                         action_text="Choose payment option",
-                        result_hint="Use create_quote and get_quote_status, then rerun this command with --billing-session-id.",
+                        result_hint="Run create-quote, complete checkout, then run quote-status and stream without --goal.",
                         pause_execution=True,
                         resume_mode="rerun_same_command",
                     )
@@ -2961,6 +3115,64 @@ def run_clear_state_command(config: Config) -> int:
     return 0
 
 
+def run_create_quote_command(config: Config, args: argparse.Namespace) -> int:
+    emit_skill_update_event(config)
+    state = load_state(config.state_path)
+    if not state.access_key:
+        state = ensure_authorized(config, state)
+
+    previous = state.pending_payment or PendingPayment()
+    offer_set_id = (getattr(args, "offer_set_id", "") or "").strip() or previous.offer_set_id
+    selected_option_id = (getattr(args, "selected_option_id", "") or "").strip()
+    requested_image_units = getattr(args, "requested_image_units", None)
+    if requested_image_units is not None and int(requested_image_units) <= 0:
+        raise RuntimeError("requested_image_units must be greater than 0")
+    if not offer_set_id:
+        raise RuntimeError("offer_set_id is required when there is no pending payment offer")
+    if not selected_option_id and requested_image_units is None:
+        raise RuntimeError("selected_option_id or requested_image_units is required")
+
+    quote_data = create_quote(
+        config,
+        state,
+        offer_set_id=offer_set_id,
+        selected_option_id=selected_option_id,
+        requested_image_units=requested_image_units,
+    )
+    pending_payment = pending_payment_from_quote_response(config, quote_data, previous)
+    state.pending_payment = pending_payment
+    save_state(config.state_path, state)
+    emit_quote_payment_required_event(pending_payment)
+    return 0
+
+
+def run_quote_status_command(config: Config, args: argparse.Namespace) -> int:
+    emit_skill_update_event(config)
+    state = load_state(config.state_path)
+    if not state.access_key:
+        state = ensure_authorized(config, state)
+
+    previous = state.pending_payment or PendingPayment()
+    quote_id = (getattr(args, "quote_id", "") or "").strip() or previous.quote_id
+    if not quote_id:
+        raise RuntimeError("quote_id is required when there is no pending payment quote")
+    if not previous.quote_id:
+        previous.quote_id = quote_id
+        previous.status_url = build_quote_status_url(config, quote_id)
+
+    quote_status = get_quote_status(config, previous, state)
+    status = first_nonempty_string(quote_status, "status") or "pending"
+    pending_payment = pending_payment_from_status_response(config, previous, quote_status)
+    state.pending_payment = pending_payment
+    save_state(config.state_path, state)
+
+    if status == "paid" and (pending_payment.session_id or pending_payment.authorization_id):
+        emit_payment_authorized_event(pending_payment, status=status)
+    else:
+        emit_payment_pending_event(pending_payment, status)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="PagePop Skill client")
     parser.add_argument(
@@ -3046,6 +3258,33 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("conversations", help="List saved local conversations for switch-chat flows")
     subparsers.add_parser("clear-state", help="Delete local state file")
 
+    create_quote_parser = subparsers.add_parser("create-quote", help="Create a paid PagePop quote from a saved offer")
+    create_quote_parser.add_argument(
+        "--offer-set-id",
+        default="",
+        help="Offer set id from payment_required; defaults to the saved pending offer",
+    )
+    create_quote_parser.add_argument(
+        "--selected-option-id",
+        "--option-id",
+        default="",
+        help="Preset offer option id selected by the user",
+    )
+    create_quote_parser.add_argument(
+        "--requested-image-units",
+        "--image-units",
+        type=int,
+        default=None,
+        help="Custom approximate image count when custom units are allowed",
+    )
+
+    quote_status_parser = subparsers.add_parser("quote-status", help="Check a paid PagePop quote status")
+    quote_status_parser.add_argument(
+        "--quote-id",
+        default="",
+        help="Quote id to poll; defaults to the saved pending quote",
+    )
+
     stream_parser = subparsers.add_parser("stream", help="Submit /v2/chat and relay raw SSE events")
     stream_parser.add_argument("--goal", default="", help="User goal sent to /v2/chat")
     stream_parser.add_argument("--artifact-type", default="auto", help="Artifact type hint stored in meta")
@@ -3105,6 +3344,10 @@ def main(argv: t.Optional[list[str]] = None) -> int:
             return run_conversations_command(config)
         if args.command == "clear-state":
             return run_clear_state_command(config)
+        if args.command == "create-quote":
+            return run_create_quote_command(config, args)
+        if args.command == "quote-status":
+            return run_quote_status_command(config, args)
         if args.command == "stream":
             return run_stream_command(config, args)
         if args.command == "resume-stream":

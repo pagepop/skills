@@ -571,13 +571,21 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
 }
 ```
 
-宿主或用户 agent 应展示 `options`，收集用户选择或自定义图片数，然后创建 quote。用户支付后，轮询 quote status；如果还未支付，继续提示支付；如果已支付，使用返回的 `session_id` 运行：
+宿主或用户 agent 应展示 `options`，收集用户选择或自定义图片数，然后创建 quote。推荐直接使用 skill 命令，让脚本复用本地认证态并保存恢复上下文：
 
 ```bash
-python3 scripts/pagepop_skill.py stream --billing-session-id ags_xxx
+python3 scripts/pagepop_skill.py create-quote --selected-option-id standard
+python3 scripts/pagepop_skill.py create-quote --requested-image-units 8
 ```
 
-不要传新的 `--goal`，脚本会读取本地 `pending_run`，并用 `X-Pagepop-Billing-Session` 恢复 `/v2/chat` 请求。旧版后端如果已经返回 `quote_id/payment_url/status_url`，脚本仍会查询 quote status，并用旧的 `X-Pagepop-Billing-Authorization` 兼容恢复。
+quote 创建后，脚本会再次输出 `payment_required`，这次包含 `quote_id` 和 `payment_url`。用户支付后，运行：
+
+```bash
+python3 scripts/pagepop_skill.py quote-status
+python3 scripts/pagepop_skill.py stream
+```
+
+`quote-status` 会保存已支付的 `session_id`；随后不要传新的 `--goal`，脚本会读取本地 `pending_run`，并用 `X-Pagepop-Billing-Session` 恢复 `/v2/chat` 请求。如果宿主自己保存了 `session_id`，也可以显式运行 `stream --billing-session-id ags_xxx`。旧版后端如果已经返回 `quote_id/payment_url/status_url`，脚本仍会查询 quote status，并用旧的 `X-Pagepop-Billing-Authorization` 兼容恢复。
 
 长耗时阶段，脚本还会补充用户可读的进度事件：
 
