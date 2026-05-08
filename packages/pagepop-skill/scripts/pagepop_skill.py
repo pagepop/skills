@@ -431,6 +431,7 @@ class StreamResult:
     conversation_id: str
     terminal_command: str
     last_offset: int
+    artifact_ready_count: int = 0
 
 
 def utc_now() -> dt.datetime:
@@ -2731,6 +2732,7 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                                 conversation_id=conversation_id,
                                 terminal_command=cmd,
                                 last_offset=last_offset,
+                                artifact_ready_count=len(emitted_artifact_ready),
                             )
                         if cmd == "retry":
                             break
@@ -2746,6 +2748,7 @@ def stream_sse_events(config: Config, state: SkillState, *, conversation_id: str
                         conversation_id=conversation_id,
                         terminal_command="done",
                         last_offset=last_offset,
+                        artifact_ready_count=len(emitted_artifact_ready),
                     )
         except urllib.error.HTTPError as exc:
             body = exc.read()
@@ -2974,7 +2977,8 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
                 terminal_command=result.terminal_command,
             )
             state.pending_run = None
-            state.pending_payment = None
+            if not (billing_session_id and result.artifact_ready_count == 0):
+                state.pending_payment = None
             save_state(config.state_path, state)
             emit_event(
                 "stream_finished",
