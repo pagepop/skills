@@ -1841,11 +1841,14 @@ def unwrap_base_response(raw: bytes) -> dict[str, t.Any]:
         raise RuntimeError("unexpected response shape")
     code = int(payload.get("code", 0))
     if code != SUCCESS_CODE:
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = payload.get("meta_data")
         raise PagepopAPIError(
             code=code,
             message=str(payload.get("message", "")).strip(),
             reason=str(payload.get("reason", "")).strip(),
-            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            metadata=metadata if isinstance(metadata, dict) else {},
             data=payload.get("data"),
         )
     data = payload.get("data")

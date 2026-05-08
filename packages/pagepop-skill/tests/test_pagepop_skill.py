@@ -1148,6 +1148,23 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(ctx.exception.openclaw_reason, "SKILL_KEY_EXPIRED")
         self.assertTrue(ctx.exception.should_reset_access_key())
 
+    def test_unwrap_base_response_error_accepts_meta_data(self) -> None:
+        raw = json.dumps(
+            {
+                "code": 703000001,
+                "message": "Payment is required to continue.",
+                "reason": "AGENT_BILLING_PAYMENT_REQUIRED",
+                "meta_data": {
+                    "openclaw_reason": "payment_offer_required",
+                    "offer_set_id": "agos_test",
+                },
+            }
+        ).encode("utf-8")
+        with self.assertRaises(client.PagepopAPIError) as ctx:
+            client.unwrap_base_response(raw)
+        self.assertEqual(ctx.exception.openclaw_reason, "payment_offer_required")
+        self.assertEqual(ctx.exception.metadata["offer_set_id"], "agos_test")
+
     def test_submit_chat_sends_billing_authorization_header(self) -> None:
         config = client.Config(
             api_base_url="https://pc-api.pagepop.cn",
