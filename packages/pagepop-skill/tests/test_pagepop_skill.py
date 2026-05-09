@@ -1209,6 +1209,31 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(headers["X-Pagepop-Billing-Session"], "ags_paid")
         self.assertEqual(headers["X-Pagepop-Billing-Authorization"], "aga_legacy")
 
+    def test_submit_chat_sends_skill_id_with_login_token_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_path = pathlib.Path(tmpdir) / "token.txt"
+            token_path.write_text("pc_token", encoding="utf-8")
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=pathlib.Path(tmpdir) / "state.json",
+                login_token_file=token_path,
+            )
+            state = client.SkillState()
+
+            with mock.patch.object(client, "http_json", return_value={"conversation_id": "conv-1"}) as http_json:
+                client.submit_chat(
+                    config,
+                    state,
+                    goal="make an image",
+                    artifact_type="auto",
+                    links=[],
+                )
+
+            headers = http_json.call_args.kwargs["headers"]
+            self.assertEqual(headers["token"], "pc_token")
+            self.assertEqual(headers["X-Pagepop-Skill-Id"], "pagepop-skill")
+
     def test_create_quote_posts_selected_offer_payload(self) -> None:
         config = client.Config(
             api_base_url="https://pc-api.pagepop.ai",

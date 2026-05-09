@@ -1933,6 +1933,7 @@ def request_auth_headers(config: Config, state: SkillState) -> dict[str, str]:
     if login_token:
         return {
             "token": login_token,
+            "X-Pagepop-Skill-Id": config.skill_id,
             "X-Pagepop-Client": DEFAULT_CLIENT_NAME,
             "Accept": "application/json",
         }
