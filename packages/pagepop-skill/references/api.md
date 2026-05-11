@@ -165,7 +165,6 @@ SSE offset 是当前服务端队列缓存内的 cursor，不是 conversation 维
 - `X-Pagepop-Skill-Id`
 - `X-Pagepop-Client: openclaw`
 - `X-Pagepop-Billing-Session: ags_xxx`，仅在 paid session 已支付后重试第一轮真正执行时发送
-- `X-Pagepop-Billing-Authorization: aga_xxx`，旧 quote 兼容路径，新接入优先使用 paid session
 
 请求体：
 
@@ -585,7 +584,7 @@ python3 scripts/pagepop_skill.py quote-status
 python3 scripts/pagepop_skill.py stream
 ```
 
-`quote-status` 会保存已支付的 `session_id`；随后不要传新的 `--goal`，脚本会读取本地 `pending_run`，并用 `X-Pagepop-Billing-Session` 恢复 `/v2/chat` 请求。如果宿主自己保存了 `session_id`，也可以显式运行 `stream --billing-session-id ags_xxx`。旧版后端如果已经返回 `quote_id/payment_url/status_url`，脚本仍会查询 quote status，并用旧的 `X-Pagepop-Billing-Authorization` 兼容恢复。
+`quote-status` 会保存已支付的 `session_id`；随后不要传新的 `--goal`，脚本会读取本地 `pending_run`，并用 `X-Pagepop-Billing-Session` 恢复 `/v2/chat` 请求。如果宿主自己保存了 `session_id`，也可以显式运行 `stream --billing-session-id ags_xxx`。
 
 长耗时阶段，脚本还会补充用户可读的进度事件：
 

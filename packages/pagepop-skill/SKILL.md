@@ -94,7 +94,7 @@ The user agent should:
 4. Run `quote-status` until `status` is `paid`. Advanced hosts may poll `GET /api/agent-billing/v1/quotes/{quote_id}` directly.
 5. Retry the saved PagePop request by running `stream` without a new `--goal`; if the host stores the paid session itself, it may pass `--billing-session-id <session_id>`.
 
-The paid session is consumed by the first real `/v2/chat` execution and ends with that run's first `finish_work`. Do not reuse the same `session_id` across later user turns. The legacy `X-Pagepop-Billing-Authorization` path is still accepted for older quotes, but new integrations should prefer `X-Pagepop-Billing-Session`.
+The paid session is consumed by the first real `/v2/chat` execution and ends with that run's first `finish_work`. Do not reuse the same `session_id` across later user turns. Paid continuation is session-only: retry `/v2/chat` with `X-Pagepop-Billing-Session`.
 
 ## Output
 

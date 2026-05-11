@@ -1165,27 +1165,6 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(ctx.exception.openclaw_reason, "payment_offer_required")
         self.assertEqual(ctx.exception.metadata["offer_set_id"], "agos_test")
 
-    def test_submit_chat_sends_billing_authorization_header(self) -> None:
-        config = client.Config(
-            api_base_url="https://pc-api.pagepop.cn",
-            skill_id="pagepop-skill",
-            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
-        )
-        state = client.SkillState(access_key="pp_sk_existing")
-
-        with mock.patch.object(client, "http_json", return_value={"conversation_id": "conv-1"}) as http_json:
-            client.submit_chat(
-                config,
-                state,
-                goal="make an image",
-                artifact_type="auto",
-                links=[],
-                billing_authorization_id="aga_paid",
-            )
-
-        headers = http_json.call_args.kwargs["headers"]
-        self.assertEqual(headers["X-Pagepop-Billing-Authorization"], "aga_paid")
-
     def test_submit_chat_sends_billing_session_header(self) -> None:
         config = client.Config(
             api_base_url="https://pc-api.pagepop.cn",
@@ -1202,12 +1181,11 @@ class PagepopSkillTests(unittest.TestCase):
                 artifact_type="auto",
                 links=[],
                 billing_session_id="ags_paid",
-                billing_authorization_id="aga_legacy",
             )
 
         headers = http_json.call_args.kwargs["headers"]
         self.assertEqual(headers["X-Pagepop-Billing-Session"], "ags_paid")
-        self.assertEqual(headers["X-Pagepop-Billing-Authorization"], "aga_legacy")
+        self.assertNotIn("X-Pagepop-Billing-Authorization", headers)
 
     def test_submit_chat_sends_skill_id_with_login_token_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1864,7 +1842,7 @@ class PagepopSkillTests(unittest.TestCase):
             assert saved.pending_payment is not None
             self.assertEqual(saved.pending_payment.session_id, "ags_paid_session")
 
-    def test_stream_command_resumes_paid_pending_payment_with_authorization_header(self) -> None:
+    def test_stream_command_resumes_paid_pending_payment_with_session_from_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = pathlib.Path(tmpdir) / "state.json"
             client.save_state(
@@ -1893,25 +1871,30 @@ class PagepopSkillTests(unittest.TestCase):
                 resume_conversation_id="",
                 new_conversation=False,
             )
-            captured_authorizations: list[str] = []
+            captured_sessions: list[str] = []
 
-            def fake_submit_chat(*_args, billing_authorization_id: str = "", **_kwargs):
-                captured_authorizations.append(billing_authorization_id)
+            def fake_submit_chat(*_args, billing_session_id: str = "", **_kwargs):
+                captured_sessions.append(billing_session_id)
                 return {"conversation_id": "conv-paid", "sse_max_offset": 0}
 
             with mock.patch.object(
                 client,
                 "get_quote_status",
-                return_value={"status": "paid", "authorization_id": "aga_paid"},
+                return_value={"status": "paid", "session_id": "ags_paid_session"},
             ), mock.patch.object(client, "submit_chat", side_effect=fake_submit_chat), mock.patch.object(
                 client,
                 "stream_sse_events",
-                return_value=client.StreamResult(conversation_id="conv-paid", terminal_command="done", last_offset=1),
+                return_value=client.StreamResult(
+                    conversation_id="conv-paid",
+                    terminal_command="done",
+                    last_offset=1,
+                    artifact_ready_count=1,
+                ),
             ), mock.patch.object(client, "emit_event"), mock.patch.object(client, "emit_record"):
                 exit_code = client.run_stream_command(config, args)
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(captured_authorizations, ["aga_paid"])
+            self.assertEqual(captured_sessions, ["ags_paid_session"])
             saved = client.load_state(state_path)
             self.assertIsNone(saved.pending_run)
             self.assertIsNone(saved.pending_payment)

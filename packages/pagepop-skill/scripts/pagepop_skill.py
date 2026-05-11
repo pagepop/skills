@@ -77,7 +77,6 @@ SOURCE_INSTALL_BUILD_SHA = "source"
 SOURCE_INSTALL_REPO = "pagepop/skills"
 PAYMENT_REQUIRED_REASON = "PAYMENT_REQUIRED"
 PAYMENT_OFFER_REQUIRED_REASON = "payment_offer_required"
-PAYMENT_AUTHORIZATION_HEADER = "X-Pagepop-Billing-Authorization"
 PAYMENT_SESSION_HEADER = "X-Pagepop-Billing-Session"
 
 KEY_RESET_REASONS = {
@@ -216,7 +215,6 @@ class PendingPayment:
     custom_units_allowed: bool = False
     expires_at: str = ""
     session_id: str = ""
-    authorization_id: str = ""
     created_at: str = dataclasses.field(default_factory=lambda: utc_now().isoformat())
 
 
@@ -304,7 +302,6 @@ class SkillState:
                 custom_units_allowed=parse_bool(pending_payment_raw.get("custom_units_allowed", False)),
                 expires_at=str(pending_payment_raw.get("expires_at", "")).strip(),
                 session_id=str(pending_payment_raw.get("session_id", "")).strip(),
-                authorization_id=str(pending_payment_raw.get("authorization_id", "")).strip(),
                 created_at=str(pending_payment_raw.get("created_at", "")).strip() or utc_now().isoformat(),
             )
         saved_conversations: list[SavedConversation] = []
@@ -2090,7 +2087,6 @@ def pending_payment_from_quote_response(
         custom_units_allowed=previous.custom_units_allowed,
         expires_at=first_nonempty_string(quote_data, "expires_at", "expiresAt") or previous.expires_at,
         session_id=previous.session_id,
-        authorization_id=previous.authorization_id,
         created_at=previous.created_at,
     )
 
@@ -2129,8 +2125,6 @@ def pending_payment_from_status_response(
         custom_units_allowed=pending_payment.custom_units_allowed,
         expires_at=first_nonempty_string(status_data, "expires_at", "expiresAt") or pending_payment.expires_at,
         session_id=first_nonempty_string(status_data, "session_id", "sessionId") or pending_payment.session_id,
-        authorization_id=first_nonempty_string(status_data, "authorization_id", "authorizationId")
-        or pending_payment.authorization_id,
         created_at=pending_payment.created_at,
     )
 
@@ -2252,24 +2246,16 @@ def emit_quote_payment_required_event(pending_payment: PendingPayment) -> None:
 
 
 def emit_payment_authorized_event(pending_payment: PendingPayment, *, status: str = "paid") -> None:
-    if pending_payment.session_id:
-        emit_event(
-            "payment_authorized",
-            quote_id=pending_payment.quote_id,
-            status=status,
-            session_id=mask_secret(pending_payment.session_id),
-            image_soft_limit=pending_payment.estimated_units or None,
-            result_hint="Rerun the saved PagePop request without --goal, or pass --billing-session-id explicitly.",
-        )
+    if not pending_payment.session_id:
         return
-    if pending_payment.authorization_id:
-        emit_event(
-            "payment_authorized",
-            quote_id=pending_payment.quote_id,
-            status=status,
-            authorization_id=mask_secret(pending_payment.authorization_id),
-            result_hint="Rerun the saved PagePop request without --goal.",
-        )
+    emit_event(
+        "payment_authorized",
+        quote_id=pending_payment.quote_id,
+        status=status,
+        session_id=mask_secret(pending_payment.session_id),
+        image_soft_limit=pending_payment.estimated_units or None,
+        result_hint="Rerun the saved PagePop request without --goal, or pass --billing-session-id explicitly.",
+    )
 
 
 def normalize_authorize_url(config: Config, authorize_url: str) -> str:
@@ -2363,7 +2349,6 @@ def submit_chat(
     artifact_type: str,
     links: list[str],
     conversation_id: str = "",
-    billing_authorization_id: str = "",
     billing_session_id: str = "",
 ) -> dict[str, t.Any]:
     payload: dict[str, t.Any] = {
@@ -2384,8 +2369,6 @@ def submit_chat(
     headers = request_auth_headers(config, state)
     if billing_session_id.strip():
         headers[PAYMENT_SESSION_HEADER] = billing_session_id.strip()
-    if billing_authorization_id.strip():
-        headers[PAYMENT_AUTHORIZATION_HEADER] = billing_authorization_id.strip()
     return http_json(
         "POST",
         f"{config.api_base_url}/v2/chat",
@@ -2858,7 +2841,6 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
             state = ensure_authorized(config, state)
 
         try:
-            billing_authorization_id = ""
             billing_session_id = billing_session_id_arg
             if state.pending_payment is not None:
                 if billing_session_id:
@@ -2873,16 +2855,12 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
                 elif state.pending_payment.session_id:
                     billing_session_id = state.pending_payment.session_id
                     emit_payment_authorized_event(state.pending_payment)
-                elif state.pending_payment.authorization_id:
-                    billing_authorization_id = state.pending_payment.authorization_id
-                    emit_payment_authorized_event(state.pending_payment)
                 elif state.pending_payment.quote_id:
                     quote_status = get_quote_status(config, state.pending_payment, state)
                     status = str(quote_status.get("status", "")).strip()
                     state.pending_payment = pending_payment_from_status_response(config, state.pending_payment, quote_status)
                     save_state(config.state_path, state)
                     session_id = state.pending_payment.session_id
-                    authorization_id = state.pending_payment.authorization_id
                     if status == "paid" and session_id:
                         billing_session_id = session_id
                         emit_event(
@@ -2891,14 +2869,6 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
                             status=status,
                             session_id=mask_secret(session_id),
                             image_soft_limit=quote_status.get("image_soft_limit") or state.pending_payment.estimated_units,
-                        )
-                    elif status == "paid" and authorization_id:
-                        billing_authorization_id = authorization_id
-                        emit_event(
-                            "payment_authorized",
-                            quote_id=state.pending_payment.quote_id,
-                            status=status,
-                            authorization_id=mask_secret(authorization_id),
                         )
                     else:
                         emit_payment_pending_event(state.pending_payment, status)
@@ -2939,7 +2909,6 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
                 artifact_type=pending_run.artifact_type,
                 links=pending_run.links,
                 conversation_id=pending_run.conversation_id,
-                billing_authorization_id=billing_authorization_id,
                 billing_session_id=billing_session_id,
             )
             conversation_id = str(chat_data.get("conversation_id", "")).strip()
@@ -3189,7 +3158,7 @@ def run_quote_status_command(config: Config, args: argparse.Namespace) -> int:
     state.pending_payment = pending_payment
     save_state(config.state_path, state)
 
-    if status == "paid" and (pending_payment.session_id or pending_payment.authorization_id):
+    if status == "paid" and pending_payment.session_id:
         emit_payment_authorized_event(pending_payment, status=status)
     else:
         emit_payment_pending_event(pending_payment, status)
