@@ -1302,6 +1302,38 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(payment_call.kwargs["quote_id"], "agq_created")
             self.assertEqual(payment_call.kwargs["payment_url"], "https://checkout.stripe.com/c/pay/cs_test")
 
+    def test_create_quote_command_rejects_membership_only_paywall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(
+                state_path,
+                client.SkillState(
+                    access_key="pp_sk_existing",
+                    pending_run=client.PendingRun(goal="make images", artifact_type="auto"),
+                    pending_payment=client.PendingPayment(
+                        paywall_mode="membership_only",
+                        primary_action="membership",
+                        membership_offer={
+                            "url": "https://t-www.pagepop.cn/member?source=agent_paywall",
+                            "action_text": "开通会员并继续",
+                        },
+                    ),
+                ),
+            )
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.ai",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                offer_set_id="",
+                selected_option_id="standard",
+                requested_image_units=None,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "PAYG is not available"):
+                client.run_create_quote_command(config, args)
+
     def test_quote_status_command_saves_paid_session_for_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = pathlib.Path(tmpdir) / "state.json"
@@ -1447,6 +1479,57 @@ class PagepopSkillTests(unittest.TestCase):
         pending = client.pending_payment_from_api_error(config, exc)
 
         self.assertEqual(pending.status_url, "https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123")
+
+    def test_pending_payment_from_api_error_parses_membership_only_paywall(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.ai",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+        )
+        exc = client.PagepopAPIError(
+            code=703000001,
+            message="payment required",
+            reason="AGENT_BILLING_PAYMENT_REQUIRED",
+            metadata={
+                "openclaw_reason": "payment_offer_required",
+                "paywall_version": "1",
+                "paywall_mode": "membership_only",
+                "primary_action": "membership",
+                "secondary_action": "",
+                "payg_enabled": "false",
+                "payg_suppressed_reason": "global_disabled",
+                "membership_offer": json.dumps(
+                    {
+                        "title": "开通会员继续生成",
+                        "message": "本次任务已保存，开通后回到 agent 可继续。",
+                        "action_text": "开通会员并继续",
+                        "url": "https://t-www.pagepop.cn/member?source=agent_paywall",
+                        "sku_id": "",
+                        "resume_mode": "rerun_same_command",
+                    }
+                ),
+                "experiment": json.dumps(
+                    {
+                        "id": "agent_paywall_v1",
+                        "variant": "membership_only",
+                        "reason": "global_disabled",
+                    }
+                ),
+            },
+        )
+
+        pending = client.pending_payment_from_api_error(config, exc)
+
+        self.assertEqual(pending.paywall_version, "1")
+        self.assertEqual(pending.paywall_mode, "membership_only")
+        self.assertEqual(pending.primary_action, "membership")
+        self.assertEqual(pending.secondary_action, "")
+        self.assertFalse(pending.payg_enabled)
+        self.assertEqual(pending.payg_suppressed_reason, "global_disabled")
+        self.assertEqual(pending.membership_offer["url"], "https://t-www.pagepop.cn/member?source=agent_paywall")
+        self.assertEqual(pending.membership_offer["sku_id"], "")
+        self.assertEqual(pending.experiment["variant"], "membership_only")
+        self.assertEqual(pending.offer_set_id, "")
 
     def test_stream_command_rejects_billing_session_for_fresh_goal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1742,6 +1825,78 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(payment_calls[0].kwargs["quote_status_url_prefix"], "/api/agent-billing/v1/quotes/")
             self.assertEqual(payment_calls[0].kwargs["options"][1]["image_soft_limit"], 9)
             self.assertTrue(payment_calls[0].kwargs["pause_execution"])
+
+    def test_stream_command_emits_membership_only_paywall_without_offer_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(state_path, client.SkillState(access_key="pp_sk_existing"))
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.ai",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                goal="make an image",
+                artifact_type="auto",
+                link=[],
+                conversation_id="",
+                resume_conversation_id="",
+                new_conversation=False,
+            )
+            membership_offer = {
+                "title": "开通会员继续生成",
+                "message": "本次任务已保存，开通后回到 agent 可继续。",
+                "action_text": "开通会员并继续",
+                "url": "https://t-www.pagepop.cn/member?source=agent_paywall",
+                "sku_id": "",
+                "resume_mode": "rerun_same_command",
+            }
+            api_error = client.PagepopAPIError(
+                code=703000001,
+                message="Open membership to continue",
+                reason="AGENT_BILLING_PAYMENT_REQUIRED",
+                metadata={
+                    "openclaw_reason": "payment_offer_required",
+                    "paywall_version": "1",
+                    "paywall_mode": "membership_only",
+                    "primary_action": "membership",
+                    "secondary_action": "",
+                    "payg_enabled": "false",
+                    "payg_suppressed_reason": "global_disabled",
+                    "membership_offer": json.dumps(membership_offer),
+                    "experiment": json.dumps(
+                        {"id": "agent_paywall_v1", "variant": "membership_only", "reason": "global_disabled"}
+                    ),
+                },
+            )
+
+            with mock.patch.object(client, "submit_chat", side_effect=api_error), mock.patch.object(
+                client,
+                "emit_event",
+            ) as emit_event, mock.patch.object(client, "emit_record"):
+                exit_code = client.run_stream_command(config, args)
+
+            self.assertEqual(exit_code, 0)
+            saved = client.load_state(state_path)
+            self.assertIsNotNone(saved.pending_run)
+            self.assertIsNotNone(saved.pending_payment)
+            assert saved.pending_payment is not None
+            self.assertEqual(saved.pending_payment.paywall_mode, "membership_only")
+            self.assertEqual(saved.pending_payment.membership_offer["url"], membership_offer["url"])
+            self.assertEqual(saved.pending_payment.offer_set_id, "")
+            payment_calls = [call for call in emit_event.call_args_list if call.args[0] == "payment_required"]
+            self.assertEqual(len(payment_calls), 1)
+            payment_call = payment_calls[0]
+            self.assertEqual(payment_call.kwargs["paywall_mode"], "membership_only")
+            self.assertEqual(payment_call.kwargs["primary_action"], "membership")
+            self.assertEqual(payment_call.kwargs["secondary_action"], "")
+            self.assertFalse(payment_call.kwargs["payg_enabled"])
+            self.assertEqual(payment_call.kwargs["payg_suppressed_reason"], "global_disabled")
+            self.assertEqual(payment_call.kwargs["membership_offer"]["url"], membership_offer["url"])
+            self.assertEqual(payment_call.kwargs["action_text"], "开通会员并继续")
+            self.assertEqual(payment_call.kwargs["offer_set_id"], "")
+            self.assertEqual(payment_call.kwargs["options"], [])
+            self.assertTrue(payment_call.kwargs["pause_execution"])
 
     def test_stream_command_resumes_paid_quote_with_session_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

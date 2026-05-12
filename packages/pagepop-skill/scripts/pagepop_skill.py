@@ -198,6 +198,14 @@ class PendingAuth:
 
 @dataclasses.dataclass
 class PendingPayment:
+    paywall_version: str = ""
+    paywall_mode: str = ""
+    primary_action: str = ""
+    secondary_action: str = ""
+    membership_offer: dict[str, t.Any] = dataclasses.field(default_factory=dict)
+    payg_enabled: bool = False
+    payg_suppressed_reason: str = ""
+    experiment: dict[str, t.Any] = dataclasses.field(default_factory=dict)
     quote_id: str = ""
     provider: str = ""
     payment_url: str = ""
@@ -281,6 +289,24 @@ class SkillState:
                 or ""
             ).strip()
             pending_payment = PendingPayment(
+                paywall_version=str(pending_payment_raw.get("paywall_version", "")).strip(),
+                paywall_mode=str(pending_payment_raw.get("paywall_mode", "")).strip(),
+                primary_action=str(pending_payment_raw.get("primary_action", "")).strip(),
+                secondary_action=str(pending_payment_raw.get("secondary_action", "")).strip(),
+                membership_offer={
+                    str(key): value
+                    for key, value in pending_payment_raw.get("membership_offer", {}).items()
+                }
+                if isinstance(pending_payment_raw.get("membership_offer"), dict)
+                else {},
+                payg_enabled=parse_bool(pending_payment_raw.get("payg_enabled", False)),
+                payg_suppressed_reason=str(pending_payment_raw.get("payg_suppressed_reason", "")).strip(),
+                experiment={
+                    str(key): value
+                    for key, value in pending_payment_raw.get("experiment", {}).items()
+                }
+                if isinstance(pending_payment_raw.get("experiment"), dict)
+                else {},
                 quote_id=str(pending_payment_raw.get("quote_id", "")).strip(),
                 provider=str(pending_payment_raw.get("provider", "")).strip(),
                 payment_url=str(pending_payment_raw.get("payment_url", "")).strip(),
@@ -347,7 +373,7 @@ class SkillState:
             access_key=str(raw.get("access_key", "")).strip(),
             pending_run=pending_run,
             pending_auth=pending_auth if pending_auth and pending_auth.auth_session_id else None,
-            pending_payment=pending_payment if pending_payment and (pending_payment.quote_id or pending_payment.offer_set_id) else None,
+            pending_payment=pending_payment if pending_payment and can_pause_for_payment_required(pending_payment) else None,
             active_conversation_id=str(raw.get("active_conversation_id", "")).strip(),
             active_conversation_updated_at=str(raw.get("active_conversation_updated_at", "")).strip(),
             saved_conversations=saved_conversations,
@@ -2033,6 +2059,15 @@ def parse_payment_options(raw_options: t.Any) -> list[dict[str, t.Any]]:
     return [item for item in options if isinstance(item, dict)]
 
 
+def parse_metadata_object(raw_value: t.Any) -> dict[str, t.Any]:
+    value = raw_value
+    if isinstance(raw_value, str):
+        value = maybe_parse_json(raw_value)
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
 def parse_bool(value: t.Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -2063,6 +2098,14 @@ def pending_payment_from_quote_response(
     if quote_id:
         status_url = build_quote_status_url(config, quote_id)
     return PendingPayment(
+        paywall_version=previous.paywall_version,
+        paywall_mode=previous.paywall_mode,
+        primary_action=previous.primary_action,
+        secondary_action=previous.secondary_action,
+        membership_offer=previous.membership_offer,
+        payg_enabled=previous.payg_enabled,
+        payg_suppressed_reason=previous.payg_suppressed_reason,
+        experiment=previous.experiment,
         quote_id=quote_id,
         provider=first_nonempty_string(quote_data, "provider") or previous.provider,
         payment_url=first_nonempty_string(quote_data, "payment_url", "paymentUrl") or previous.payment_url,
@@ -2101,6 +2144,14 @@ def pending_payment_from_status_response(
     if quote_id and not status_url:
         status_url = build_quote_status_url(config, quote_id)
     return PendingPayment(
+        paywall_version=pending_payment.paywall_version,
+        paywall_mode=pending_payment.paywall_mode,
+        primary_action=pending_payment.primary_action,
+        secondary_action=pending_payment.secondary_action,
+        membership_offer=pending_payment.membership_offer,
+        payg_enabled=pending_payment.payg_enabled,
+        payg_suppressed_reason=pending_payment.payg_suppressed_reason,
+        experiment=pending_payment.experiment,
         quote_id=quote_id,
         provider=first_nonempty_string(status_data, "provider") or pending_payment.provider,
         payment_url=pending_payment.payment_url,
@@ -2144,6 +2195,14 @@ def pending_payment_from_api_error(config: Config, exc: PagepopAPIError) -> Pend
         metadata.get("quote_status_url_prefix") or metadata.get("quote_status_endpoint") or ""
     ).strip()
     return PendingPayment(
+        paywall_version=str(metadata.get("paywall_version", "")).strip(),
+        paywall_mode=str(metadata.get("paywall_mode", "")).strip(),
+        primary_action=str(metadata.get("primary_action", "")).strip(),
+        secondary_action=str(metadata.get("secondary_action", "")).strip(),
+        membership_offer=parse_metadata_object(metadata.get("membership_offer")),
+        payg_enabled=parse_bool(metadata.get("payg_enabled", bool(str(metadata.get("offer_set_id", "")).strip()))),
+        payg_suppressed_reason=str(metadata.get("payg_suppressed_reason", "")).strip(),
+        experiment=parse_metadata_object(metadata.get("experiment")),
         quote_id=quote_id,
         provider=str(metadata.get("provider", "")).strip(),
         payment_url=str(metadata.get("payment_url", "")).strip(),
@@ -2163,9 +2222,43 @@ def pending_payment_from_api_error(config: Config, exc: PagepopAPIError) -> Pend
     )
 
 
-def emit_payment_required_event(pending_payment: PendingPayment, exc: PagepopAPIError) -> None:
+def emit_payment_required_event(
+    pending_payment: PendingPayment,
+    exc: t.Optional[PagepopAPIError] = None,
+) -> None:
+    membership_offer = pending_payment.membership_offer if isinstance(pending_payment.membership_offer, dict) else {}
+    is_payg_offer = bool(pending_payment.offer_set_id and not pending_payment.quote_id)
+    is_membership_paywall = bool(pending_payment.paywall_mode or membership_offer)
+    title = str(membership_offer.get("title", "")).strip() if is_membership_paywall else ""
+    message = str(membership_offer.get("message", "")).strip() if is_membership_paywall else ""
+    action_text = str(membership_offer.get("action_text", "")).strip() if is_membership_paywall else ""
+    if not title:
+        title = "Payment required to continue"
+    if not message:
+        message = (
+            "Choose a paid image option, create a quote, open the payment link, "
+            "then retry this PagePop command with the paid session id."
+            if is_payg_offer
+            else "Open the payment link, complete checkout, then run the same PagePop command again."
+        )
+    if not action_text:
+        action_text = "Choose payment option" if is_payg_offer else "Open payment page"
+    if is_membership_paywall and not pending_payment.offer_set_id:
+        result_hint = "Open the membership URL, then rerun this PagePop command without changing the request."
+    elif is_payg_offer:
+        result_hint = "After payment succeeds, rerun this PagePop command with --billing-session-id."
+    else:
+        result_hint = "After payment succeeds, rerun this PagePop command without changing the request."
     emit_event(
         "payment_required",
+        paywall_version=pending_payment.paywall_version,
+        paywall_mode=pending_payment.paywall_mode,
+        primary_action=pending_payment.primary_action,
+        secondary_action=pending_payment.secondary_action,
+        membership_offer=membership_offer,
+        payg_enabled=pending_payment.payg_enabled,
+        payg_suppressed_reason=pending_payment.payg_suppressed_reason,
+        experiment=pending_payment.experiment,
         quote_id=pending_payment.quote_id,
         provider=pending_payment.provider,
         payment_url=pending_payment.payment_url,
@@ -2182,23 +2275,22 @@ def emit_payment_required_event(pending_payment: PendingPayment, exc: PagepopAPI
         quote_status_url_prefix=pending_payment.quote_status_url_prefix,
         custom_units_allowed=pending_payment.custom_units_allowed,
         expires_at=pending_payment.expires_at,
-        title="Payment required to continue",
-        message=(
-            "Choose a paid image option, create a quote, open the payment link, "
-            "then retry this PagePop command with the paid session id."
-            if pending_payment.offer_set_id and not pending_payment.quote_id
-            else "Open the payment link, complete checkout, then run the same PagePop command again."
-        ),
-        backend_message=exc.message,
-        action_text="Choose payment option" if pending_payment.offer_set_id and not pending_payment.quote_id else "Open payment page",
-        result_hint=(
-            "After payment succeeds, rerun this PagePop command with --billing-session-id."
-            if pending_payment.offer_set_id and not pending_payment.quote_id
-            else "After payment succeeds, rerun this PagePop command without changing the request."
-        ),
+        title=title,
+        message=message,
+        backend_message=exc.message if exc else "",
+        action_text=action_text,
+        result_hint=result_hint,
         pause_execution=True,
         resume_mode="rerun_same_command",
     )
+
+
+def can_pause_for_payment_required(pending_payment: PendingPayment) -> bool:
+    if pending_payment.quote_id or pending_payment.offer_set_id:
+        return True
+    if pending_payment.paywall_mode and pending_payment.membership_offer:
+        return True
+    return False
 
 
 def emit_payment_pending_event(pending_payment: PendingPayment, status: str) -> None:
@@ -2875,31 +2967,7 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
                         save_state(config.state_path, state)
                         return 0
                 else:
-                    emit_event(
-                        "payment_required",
-                        quote_id=state.pending_payment.quote_id,
-                        provider=state.pending_payment.provider,
-                        payment_url=state.pending_payment.payment_url,
-                        status_url=state.pending_payment.status_url,
-                        amount=state.pending_payment.amount,
-                        currency=state.pending_payment.currency,
-                        estimated_units=state.pending_payment.estimated_units,
-                        capability=state.pending_payment.capability,
-                        offer_set_id=state.pending_payment.offer_set_id,
-                        options=state.pending_payment.options,
-                        quote_endpoint=state.pending_payment.quote_endpoint,
-                        quote_status_endpoint=state.pending_payment.quote_status_endpoint,
-                        create_quote_endpoint=state.pending_payment.create_quote_endpoint,
-                        quote_status_url_prefix=state.pending_payment.quote_status_url_prefix,
-                        custom_units_allowed=state.pending_payment.custom_units_allowed,
-                        expires_at=state.pending_payment.expires_at,
-                        title="Payment required to continue",
-                        message="Choose a paid image option, create and pay a quote, then retry with --billing-session-id.",
-                        action_text="Choose payment option",
-                        result_hint="Run create-quote, complete checkout, then run quote-status and stream without --goal.",
-                        pause_execution=True,
-                        resume_mode="rerun_same_command",
-                    )
+                    emit_payment_required_event(state.pending_payment)
                     save_state(config.state_path, state)
                     return 0
             chat_data = submit_chat(
@@ -2960,8 +3028,8 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
         except PagepopAPIError as exc:
             if exc.is_payment_required():
                 pending_payment = pending_payment_from_api_error(config, exc)
-                if not pending_payment.quote_id and not pending_payment.offer_set_id:
-                    raise RuntimeError("payment required response missing quote_id or offer_set_id") from exc
+                if not can_pause_for_payment_required(pending_payment):
+                    raise RuntimeError("payment required response missing quote_id, offer_set_id, or membership_offer") from exc
                 state.pending_run = pending_run
                 state.pending_payment = pending_payment
                 save_state(config.state_path, state)
@@ -3120,6 +3188,11 @@ def run_create_quote_command(config: Config, args: argparse.Namespace) -> int:
     if requested_image_units is not None and int(requested_image_units) <= 0:
         raise RuntimeError("requested_image_units must be greater than 0")
     if not offer_set_id:
+        if previous.paywall_mode == "membership_only":
+            membership_url = str(previous.membership_offer.get("url", "")).strip()
+            if membership_url:
+                raise RuntimeError(f"PAYG is not available for this saved paywall; open membership URL: {membership_url}")
+            raise RuntimeError("PAYG is not available for this saved paywall")
         raise RuntimeError("offer_set_id is required when there is no pending payment offer")
     if not selected_option_id and requested_image_units is None:
         raise RuntimeError("selected_option_id or requested_image_units is required")
