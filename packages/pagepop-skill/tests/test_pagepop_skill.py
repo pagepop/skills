@@ -1360,7 +1360,7 @@ class PagepopSkillTests(unittest.TestCase):
                         paywall_mode="membership_only",
                         primary_action="membership",
                         membership_offer={
-                            "url": "https://t-www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
+                            "url": "https://t-www.pagepop.cn/?pricing=1&tab=annually&source=agentpaywall",
                             "action_text": "开通会员并继续",
                         },
                     ),
@@ -1550,11 +1550,13 @@ class PagepopSkillTests(unittest.TestCase):
                         "title": "开通会员继续生成",
                         "message": "本次任务已保存，开通后回到 agent 可继续。",
                         "action_text": "开通会员并继续",
-                        "url": "https://t-www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
+                        "url": "https://t-www.pagepop.cn/?pricing=1&tab=annually&source=agentpaywall",
                         "sku_id": "",
                         "resume_mode": "rerun_same_command",
                     }
                 ),
+                "insufficient_reason_text": "当前账号可用积分不足，PagePop 已暂停本次生成。",
+                "available_points_text": "当前可用积分：0",
                 "experiment": json.dumps(
                     {
                         "id": "agent_paywall_v1",
@@ -1575,8 +1577,10 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(pending.payg_suppressed_reason, "global_disabled")
         self.assertEqual(
             pending.membership_offer["url"],
-            "https://t-www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
+            "https://t-www.pagepop.cn/?pricing=1&tab=annually&source=agentpaywall",
         )
+        self.assertEqual(pending.insufficient_reason_text, "当前账号可用积分不足，PagePop 已暂停本次生成。")
+        self.assertEqual(pending.available_points_text, "当前可用积分：0")
         self.assertEqual(pending.membership_offer["sku_id"], "")
         self.assertEqual(pending.experiment["variant"], "membership_only")
         self.assertEqual(pending.offer_set_id, "")
@@ -1897,7 +1901,7 @@ class PagepopSkillTests(unittest.TestCase):
                 "title": "开通会员继续生成",
                 "message": "获得更多积分，长期生成更划算。本次任务已保存，开通后回到 agent 可继续。",
                 "action_text": "开通会员并继续",
-                "url": "https://t-www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
+                "url": "https://t-www.pagepop.cn/?pricing=1&tab=annually&source=agentpaywall",
                 "resume_mode": "rerun_same_command",
             }
             api_error = client.PagepopAPIError(
@@ -1912,10 +1916,12 @@ class PagepopSkillTests(unittest.TestCase):
                     "secondary_action": "payg",
                     "payg_enabled": "true",
                     "membership_offer": json.dumps(membership_offer),
+                    "insufficient_reason_text": "当前账号可用积分不足，PagePop 已暂停本次生成。",
+                    "available_points_text": "当前可用积分：0",
                     "offer_set_id": "agos_123",
                     "options": json.dumps(
                         [
-                            {"option_id": "light", "image_soft_limit": 2, "amount_cents": 138, "currency": "USD"},
+                            {"option_id": "light", "image_soft_limit": 2, "amount_cents": 99, "currency": "USD"},
                         ]
                     ),
                     "provider": "stripe_checkout",
@@ -1937,6 +1943,11 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(payment_call.kwargs["secondary_action"], "payg")
             self.assertEqual(payment_call.kwargs["action_text"], "开通会员并继续")
             self.assertEqual(payment_call.kwargs["membership_offer"]["url"], membership_offer["url"])
+            self.assertNotIn("_", payment_call.kwargs["membership_offer"]["url"])
+            self.assertEqual(payment_call.kwargs["insufficient_reason_text"], "当前账号可用积分不足，PagePop 已暂停本次生成。")
+            self.assertEqual(payment_call.kwargs["available_points_text"], "当前可用积分：0")
+            self.assertIn("当前账号可用积分不足", payment_call.kwargs["message"])
+            self.assertIn("当前可用积分：0", payment_call.kwargs["message"])
             self.assertEqual(payment_call.kwargs["recommended_action"], "membership")
             self.assertEqual(payment_call.kwargs["payg_role"], "secondary_fallback")
             self.assertTrue(payment_call.kwargs["payg_available"])
@@ -1967,17 +1978,17 @@ class PagepopSkillTests(unittest.TestCase):
                                 "option_id": "light",
                                 "label": "Light",
                                 "image_soft_limit": 2,
-                                "amount_cents": 138,
+                                "amount_cents": 99,
                                 "currency": "USD",
                             },
                             {
                                 "option_id": "standard",
                                 "label": "Standard",
                                 "image_soft_limit": 6,
-                                "amount_cents": 414,
+                                "amount_cents": 299,
                                 "currency": "USD",
                                 "description": "常规图文任务",
-                                "price_label": "$4.14",
+                                "price_label": "$2.99",
                             },
                         ],
                         create_quote_endpoint="/api/agent-billing/v1/quotes",
@@ -2002,7 +2013,7 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(payment_options_call.kwargs["offer_set_id"], "agos_123")
             self.assertEqual(payment_options_call.kwargs["create_quote_endpoint"], "/api/agent-billing/v1/quotes")
             self.assertEqual(payment_options_call.kwargs["options"][0]["option_id"], "light")
-            self.assertEqual(payment_options_call.kwargs["options"][0]["price_label"], "$1.38")
+            self.assertEqual(payment_options_call.kwargs["options"][0]["price_label"], "$0.99")
             self.assertIn("2 张图片", payment_options_call.kwargs["options"][0]["limit_text"])
             self.assertEqual(payment_options_call.kwargs["options"][1]["description"], "常规图文任务")
             self.assertEqual(payment_options_call.kwargs["recommended_action"], "payg")
@@ -2029,7 +2040,7 @@ class PagepopSkillTests(unittest.TestCase):
                 "title": "开通会员继续生成",
                 "message": "本次任务已保存，开通后回到 agent 可继续。",
                 "action_text": "开通会员并继续",
-                "url": "https://t-www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
+                "url": "https://t-www.pagepop.cn/?pricing=1&tab=annually&source=agentpaywall",
                 "sku_id": "",
                 "resume_mode": "rerun_same_command",
             }
@@ -2046,6 +2057,8 @@ class PagepopSkillTests(unittest.TestCase):
                     "payg_enabled": "false",
                     "payg_suppressed_reason": "global_disabled",
                     "membership_offer": json.dumps(membership_offer),
+                    "insufficient_reason_text": "当前账号可用积分不足，PagePop 已暂停本次生成。",
+                    "available_points_text": "当前可用积分：0",
                     "experiment": json.dumps(
                         {"id": "agent_paywall_v1", "variant": "membership_only", "reason": "global_disabled"}
                     ),
@@ -2075,6 +2088,11 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertFalse(payment_call.kwargs["payg_enabled"])
             self.assertEqual(payment_call.kwargs["payg_suppressed_reason"], "global_disabled")
             self.assertEqual(payment_call.kwargs["membership_offer"]["url"], membership_offer["url"])
+            self.assertNotIn("_", payment_call.kwargs["membership_offer"]["url"])
+            self.assertEqual(payment_call.kwargs["insufficient_reason_text"], "当前账号可用积分不足，PagePop 已暂停本次生成。")
+            self.assertEqual(payment_call.kwargs["available_points_text"], "当前可用积分：0")
+            self.assertIn("当前账号可用积分不足", payment_call.kwargs["message"])
+            self.assertIn("当前可用积分：0", payment_call.kwargs["message"])
             self.assertEqual(payment_call.kwargs["action_text"], "开通会员并继续")
             self.assertEqual(payment_call.kwargs["offer_set_id"], "")
             self.assertEqual(payment_call.kwargs["options"], [])

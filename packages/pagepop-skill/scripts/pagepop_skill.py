@@ -204,6 +204,8 @@ class PendingPayment:
     paywall_mode: str = ""
     primary_action: str = ""
     secondary_action: str = ""
+    insufficient_reason_text: str = ""
+    available_points_text: str = ""
     membership_offer: dict[str, t.Any] = dataclasses.field(default_factory=dict)
     payg_enabled: bool = False
     payg_suppressed_reason: str = ""
@@ -295,6 +297,8 @@ class SkillState:
                 paywall_mode=str(pending_payment_raw.get("paywall_mode", "")).strip(),
                 primary_action=str(pending_payment_raw.get("primary_action", "")).strip(),
                 secondary_action=str(pending_payment_raw.get("secondary_action", "")).strip(),
+                insufficient_reason_text=str(pending_payment_raw.get("insufficient_reason_text", "")).strip(),
+                available_points_text=str(pending_payment_raw.get("available_points_text", "")).strip(),
                 membership_offer={
                     str(key): value
                     for key, value in pending_payment_raw.get("membership_offer", {}).items()
@@ -2189,6 +2193,8 @@ def pending_payment_from_quote_response(
         paywall_mode=previous.paywall_mode,
         primary_action=previous.primary_action,
         secondary_action=previous.secondary_action,
+        insufficient_reason_text=previous.insufficient_reason_text,
+        available_points_text=previous.available_points_text,
         membership_offer=previous.membership_offer,
         payg_enabled=previous.payg_enabled,
         payg_suppressed_reason=previous.payg_suppressed_reason,
@@ -2235,6 +2241,8 @@ def pending_payment_from_status_response(
         paywall_mode=pending_payment.paywall_mode,
         primary_action=pending_payment.primary_action,
         secondary_action=pending_payment.secondary_action,
+        insufficient_reason_text=pending_payment.insufficient_reason_text,
+        available_points_text=pending_payment.available_points_text,
         membership_offer=pending_payment.membership_offer,
         payg_enabled=pending_payment.payg_enabled,
         payg_suppressed_reason=pending_payment.payg_suppressed_reason,
@@ -2286,6 +2294,8 @@ def pending_payment_from_api_error(config: Config, exc: PagepopAPIError) -> Pend
         paywall_mode=str(metadata.get("paywall_mode", "")).strip(),
         primary_action=str(metadata.get("primary_action", "")).strip(),
         secondary_action=str(metadata.get("secondary_action", "")).strip(),
+        insufficient_reason_text=str(metadata.get("insufficient_reason_text", "")).strip(),
+        available_points_text=str(metadata.get("available_points_text", "")).strip(),
         membership_offer=parse_metadata_object(metadata.get("membership_offer")),
         payg_enabled=parse_bool(metadata.get("payg_enabled", bool(str(metadata.get("offer_set_id", "")).strip()))),
         payg_suppressed_reason=str(metadata.get("payg_suppressed_reason", "")).strip(),
@@ -2309,6 +2319,18 @@ def pending_payment_from_api_error(config: Config, exc: PagepopAPIError) -> Pend
     )
 
 
+def join_distinct_lines(*lines: str) -> str:
+    result: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        text = str(line).strip()
+        if not text or text in seen:
+            continue
+        result.append(text)
+        seen.add(text)
+    return "\n".join(result)
+
+
 def emit_payment_required_event(
     pending_payment: PendingPayment,
     exc: t.Optional[PagepopAPIError] = None,
@@ -2327,6 +2349,12 @@ def emit_payment_required_event(
             "then retry this PagePop command with the paid session id."
             if is_payg_offer
             else "Open the payment link, complete checkout, then run the same PagePop command again."
+        )
+    if is_membership_paywall:
+        message = join_distinct_lines(
+            pending_payment.insufficient_reason_text,
+            message,
+            pending_payment.available_points_text,
         )
     if not action_text:
         action_text = "Choose payment option" if is_payg_offer else "Open payment page"
@@ -2351,6 +2379,8 @@ def emit_payment_required_event(
         "paywall_mode": pending_payment.paywall_mode,
         "primary_action": pending_payment.primary_action,
         "secondary_action": pending_payment.secondary_action,
+        "insufficient_reason_text": pending_payment.insufficient_reason_text,
+        "available_points_text": pending_payment.available_points_text,
         "recommended_action": "membership" if is_membership_paywall else ("payg" if is_payg_offer else "payment"),
         "payg_role": "secondary_fallback" if is_membership_paywall and pending_payment.offer_set_id else "",
         "membership_offer": membership_offer,
