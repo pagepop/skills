@@ -27,6 +27,9 @@ python3 scripts/pagepop_skill.py auth
 python3 scripts/pagepop_skill.py conversations
 python3 scripts/pagepop_skill.py stream --goal "Create a product launch deck"
 python3 scripts/pagepop_skill.py stream --new-chat --goal "Create a rednote post about camping gear"
+python3 scripts/pagepop_skill.py create-quote --selected-option-id standard
+python3 scripts/pagepop_skill.py quote-status
+python3 scripts/pagepop_skill.py stream --billing-session-id ags_xxx
 python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx --offset 0
 ```
 
@@ -79,12 +82,34 @@ Hosts should prefer their matching `channel_presentations` entry, then fall back
 Feishu hosts should avoid rendering raw URLs from generic `presentation`; use the Feishu card buttons or Feishu-specific fallback text so underscores in URLs are not truncated by lark_md auto-linking.
 When composing a Feishu chat message manually, send `channel_presentations.feishu.media.local_image_messages` as image messages first, then send `channel_presentations.feishu.plain_text` or `artifact.display_text`; do not copy raw image URLs from `artifact.text` or `sse_event.data` into `lark_md`.
 
+## Paywall and Paid Session Flow
+
+When `/v2/chat` returns `metadata.openclaw_reason=payment_offer_required`, pause the run and show the emitted `payment_required` event to the user. If the event includes `membership_offer`, present membership as the primary action and do not show PAYG option details by default.
+
+The event may include `paywall_mode`, `primary_action`, `secondary_action`, `recommended_action`, `payg_role`, `membership_offer`, `insufficient_reason_text`, `available_points_text`, `payg_enabled`, `payg_available`, `payg_action_text`, `payg_hint`, and `payg_suppressed_reason`.
+
+The user agent should:
+
+1. Always first tell the user why PagePop paused. If `insufficient_reason_text` or `available_points_text` exists, include that context before the membership or payment actions.
+2. Always present `membership_offer` as the primary action when it exists.
+3. If `paywall_mode=membership_only` or `payg_available` is not true, do not call `create-quote`; open the membership URL and let the user return to the agent, then rerun `stream` without a new `--goal`.
+4. If `payg_available=true`, treat PAYG as a secondary fallback only. Do not recommend PAYG by default and do not display preset prices/options until the user explicitly asks to pay only for the current run.
+5. For explicit PAYG fallback, run `payment-options` to show the saved preset options, then create a quote with `create-quote --selected-option-id <option_id>` or `create-quote --requested-image-units <count>`. Advanced hosts may call `POST /api/agent-billing/v1/quotes` directly only after the user chooses PAYG.
+6. Open or display the returned `payment_url`.
+7. Run `quote-status` until `status` is `paid`. Advanced hosts may poll `GET /api/agent-billing/v1/quotes/{quote_id}` directly.
+8. Retry the saved PagePop request by running `stream` without a new `--goal`; if the host stores the paid session itself, it may pass `--billing-session-id <session_id>`.
+
+The paid session is consumed by the first real `/v2/chat` execution and ends with that run's first `finish_work`. Do not reuse the same `session_id` across later user turns. Paid continuation is session-only: retry `/v2/chat` with `X-Pagepop-Billing-Session`.
+
 ## Output
 
 The skill emits JSON Lines. Important event kinds include:
 
 - `auth_required`
 - `auth_authorized`
+- `payment_required`
+- `payment_pending`
+- `payment_authorized`
 - `chat_context`
 - `conversation_history`
 - `chat_submitted`
