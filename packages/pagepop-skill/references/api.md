@@ -196,7 +196,7 @@ SSE offset 是当前服务端队列缓存内的 cursor，不是 conversation 维
 }
 ```
 
-如果积分不足且后端需要展示 paywall，错误响应会带 `metadata.openclaw_reason=payment_offer_required`。用户 agent 不需要传价格、预算或内部约束。会员入口由 `membership_offer.url` 提供；如果后端同时返回 `offer_set_id`，用户 agent 可以把用户选择转换为 quote 请求，然后用支付成功返回的 session 重试 chat。
+如果积分不足且后端需要展示 paywall，错误响应会带 `metadata.openclaw_reason=payment_offer_required`。用户 agent 不需要传价格、预算或内部约束。会员入口由 `membership_offer.url` 提供。skill 会保存后端返回的 PAYG offer，但初始 `payment_required` 事件默认不展示 PAYG 档位；只有用户明确选择“仅本次付费”时，才运行 `payment-options` 展示档位并创建 quote。
 
 示例错误 metadata：
 
@@ -209,7 +209,7 @@ SSE offset 是当前服务端队列缓存内的 cursor，不是 conversation 维
   "secondary_action": "payg",
   "payg_enabled": "true",
   "payg_suppressed_reason": "",
-  "membership_offer": "{\"title\":\"开通会员继续生成\",\"message\":\"本次任务已保存，开通后回到 agent 可继续。\",\"action_text\":\"开通会员并继续\",\"url\":\"https://t-www.pagepop.cn/member?source=agent_paywall\",\"sku_id\":\"\",\"resume_mode\":\"rerun_same_command\"}",
+  "membership_offer": "{\"title\":\"开通会员继续生成\",\"message\":\"本次任务已保存，开通后回到 agent 可继续。\",\"action_text\":\"开通会员并继续\",\"url\":\"https://www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall\",\"sku_id\":\"\",\"resume_mode\":\"rerun_same_command\"}",
   "offer_set_id": "agos_123",
   "options": "[{\"option_id\":\"opt_3\",\"image_soft_limit\":3,\"amount_cents\":499,\"currency\":\"CNY\"}]",
   "provider": "alipay",
@@ -223,9 +223,9 @@ SSE offset 是当前服务端队列缓存内的 cursor，不是 conversation 维
 用户 agent 流程：
 
 1. 先展示 `membership_offer` 作为主路径。
-2. 如果 `paywall_mode=membership_only` 或没有 `offer_set_id`，不要调用 `create-quote`；用户开通会员后回到 agent 继续，skill 会重放已保存的 `pending_run`。
-3. 如果有 `offer_set_id`，展示 `options` 中的档位；如果 `custom_units_allowed=true`，也可以让用户输入自定义图片数。
-4. 调用 `POST /api/agent-billing/v1/quotes` 创建 quote。
+2. 如果 `paywall_mode=membership_only` 或 `payg_available` 不是 true，不要调用 `create-quote`；用户开通会员后回到 agent 继续，skill 会重放已保存的 `pending_run`。
+3. 如果 `payg_available=true`，PAYG 仍只是次级 fallback；不要默认展示价格和档位。
+4. 用户明确选择“仅本次付费”后，运行 `payment-options` 展示 `options`，再调用 `create-quote` 创建 quote。
 5. 引导用户打开返回的 `payment_url` 完成支付。
 6. 轮询 `GET /api/agent-billing/v1/quotes/{quote_id}`。
 7. `status=paid` 后，拿 `session_id` 重试原来的 `/v2/chat`，请求头带 `X-Pagepop-Billing-Session: <session_id>`。
@@ -543,7 +543,7 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
 }
 ```
 
-积分不足且后端返回 paid session offer 时，会先输出：
+积分不足且后端返回会员 + PAYG fallback 时，会先输出会员主推事件。注意：此事件不会暴露 `offer_set_id`、`options` 或 quote endpoint；这些只保存在本地 pending state，供显式 PAYG fallback 使用。
 
 ```json
 {
@@ -556,11 +556,14 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
     "title": "开通会员继续生成",
     "message": "本次任务已保存，开通后回到 agent 可继续。",
     "action_text": "开通会员并继续",
-    "url": "https://t-www.pagepop.cn/member?source=agent_paywall",
+    "url": "https://www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
     "sku_id": "",
     "resume_mode": "rerun_same_command"
   },
   "payg_enabled": true,
+  "payg_available": true,
+  "payg_action_text": "仅本次付费继续",
+  "payg_hint": "如果只想完成本次任务，可明确选择“仅本次付费”后再查看单次付费选项。",
   "payg_suppressed_reason": "",
   "quote_id": "",
   "provider": "alipay",
@@ -570,24 +573,13 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
   "currency": "",
   "estimated_units": "",
   "capability": "",
-  "offer_set_id": "agos_123",
-  "options": [
-    {
-      "option_id": "opt_3",
-      "image_soft_limit": 3,
-      "amount_cents": 499,
-      "currency": "CNY"
-    }
-  ],
-  "quote_endpoint": "/api/agent-billing/v1/quotes",
-  "quote_status_endpoint": "/api/agent-billing/v1/quotes/",
-  "create_quote_endpoint": "/api/agent-billing/v1/quotes",
-  "quote_status_url_prefix": "/api/agent-billing/v1/quotes/",
-  "custom_units_allowed": true,
   "expires_at": "2026-05-07T02:00:00Z",
   "title": "开通会员继续生成",
   "message": "本次任务已保存，开通后回到 agent 可继续。",
   "action_text": "开通会员并继续",
+  "recommended_action": "membership",
+  "payg_role": "secondary_fallback",
+  "result_hint": "Recommended action: open the membership URL and choose a membership plan to continue. PAYG is only a secondary fallback when the user explicitly asks to pay only for this one run.",
   "pause_execution": true,
   "resume_mode": "rerun_same_command"
 }
@@ -606,7 +598,7 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
     "title": "开通会员继续生成",
     "message": "本次任务已保存，开通后回到 agent 可继续。",
     "action_text": "开通会员并继续",
-    "url": "https://t-www.pagepop.cn/member?source=agent_paywall",
+    "url": "https://www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
     "sku_id": "",
     "resume_mode": "rerun_same_command"
   },
@@ -619,7 +611,13 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
 }
 ```
 
-仅当事件包含 `offer_set_id` 时，宿主或用户 agent 才应展示 `options`，收集用户选择或自定义图片数，然后创建 quote。推荐直接使用 skill 命令，让脚本复用本地认证态并保存恢复上下文：
+宿主应始终优先展示 `membership_offer` 作为主入口。仅当用户明确选择“仅本次付费”时，才运行 `payment-options` 展示已保存的次级 PAYG 档位：
+
+```bash
+python3 scripts/pagepop_skill.py payment-options
+```
+
+随后收集用户选择或自定义图片数，然后创建 quote。推荐直接使用 skill 命令，让脚本复用本地认证态并保存恢复上下文：
 
 ```bash
 python3 scripts/pagepop_skill.py create-quote --selected-option-id standard

@@ -84,16 +84,16 @@ When composing a Feishu chat message manually, send `channel_presentations.feish
 
 ## Paywall and Paid Session Flow
 
-When `/v2/chat` returns `metadata.openclaw_reason=payment_offer_required`, pause the run and show the emitted `payment_required` event to the user. The event includes `offer_set_id`, parsed `options`, `provider`, `create_quote_endpoint`, `quote_status_url_prefix`, `custom_units_allowed`, and `expires_at`.
+When `/v2/chat` returns `metadata.openclaw_reason=payment_offer_required`, pause the run and show the emitted `payment_required` event to the user. If the event includes `membership_offer`, present membership as the primary action and do not show PAYG option details by default.
 
-The event may also include `paywall_mode`, `primary_action`, `secondary_action`, `membership_offer`, `payg_enabled`, and `payg_suppressed_reason`.
+The event may include `paywall_mode`, `primary_action`, `secondary_action`, `recommended_action`, `payg_role`, `membership_offer`, `payg_enabled`, `payg_available`, `payg_action_text`, `payg_hint`, and `payg_suppressed_reason`.
 
 The user agent should:
 
 1. Always present `membership_offer` as the primary action when it exists.
-2. If `paywall_mode=membership_only` or no `offer_set_id` exists, do not call `create-quote`; open the membership URL and let the user return to the agent, then rerun `stream` without a new `--goal`.
-3. If `offer_set_id` exists, show the preset options and, when `custom_units_allowed` is true, allow a custom image count.
-4. Create a quote with `create-quote --selected-option-id <option_id>` or `create-quote --requested-image-units <count>`. Advanced hosts may call `POST /api/agent-billing/v1/quotes` directly with `{ "offer_set_id": "...", "selected_option_id": "...", "requested_image_units": 5 }`.
+2. If `paywall_mode=membership_only` or `payg_available` is not true, do not call `create-quote`; open the membership URL and let the user return to the agent, then rerun `stream` without a new `--goal`.
+3. If `payg_available=true`, treat PAYG as a secondary fallback only. Do not recommend PAYG by default and do not display preset prices/options until the user explicitly asks to pay only for the current run.
+4. For explicit PAYG fallback, run `payment-options` to show the saved preset options, then create a quote with `create-quote --selected-option-id <option_id>` or `create-quote --requested-image-units <count>`. Advanced hosts may call `POST /api/agent-billing/v1/quotes` directly only after the user chooses PAYG.
 5. Open or display the returned `payment_url`.
 6. Run `quote-status` until `status` is `paid`. Advanced hosts may poll `GET /api/agent-billing/v1/quotes/{quote_id}` directly.
 7. Retry the saved PagePop request by running `stream` without a new `--goal`; if the host stores the paid session itself, it may pass `--billing-session-id <session_id>`.

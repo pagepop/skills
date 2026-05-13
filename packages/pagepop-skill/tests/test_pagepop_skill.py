@@ -937,6 +937,27 @@ class PagepopSkillTests(unittest.TestCase):
             "https://custom.example.test",
         )
 
+    def test_build_config_derives_mainland_client_type_from_region(self) -> None:
+        parser = client.build_parser()
+        args = parser.parse_args(["--region", "CN", "--state-dir", "/tmp/pagepop-skill-test", "status"])
+
+        config = client.build_config(args)
+
+        self.assertEqual(config.region, "CN")
+        self.assertEqual(config.api_base_url, "https://pc-api.pagepop.cn")
+        self.assertEqual(config.client_type, 12)
+
+    def test_build_config_allows_explicit_client_type_override(self) -> None:
+        parser = client.build_parser()
+        args = parser.parse_args(
+            ["--region", "CN", "--client-type", "11", "--state-dir", "/tmp/pagepop-skill-test", "status"]
+        )
+
+        config = client.build_config(args)
+
+        self.assertEqual(config.region, "CN")
+        self.assertEqual(config.client_type, 11)
+
     def test_build_artifact_delivery_uses_generic_presentation_shape(self) -> None:
         delivery = client.build_artifact_delivery(
             {
@@ -1187,6 +1208,30 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(headers["X-Pagepop-Billing-Session"], "ags_paid")
         self.assertNotIn("X-Pagepop-Billing-Authorization", headers)
 
+    def test_submit_chat_sends_accept_language_for_mainland_region(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.cn",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+            region="CN",
+            client_type=12,
+        )
+        state = client.SkillState(access_key="pp_sk_existing")
+
+        with mock.patch.object(client, "http_json", return_value={"conversation_id": "conv-1"}) as http_json:
+            client.submit_chat(
+                config,
+                state,
+                goal="make an image",
+                artifact_type="auto",
+                links=[],
+            )
+
+        headers = http_json.call_args.kwargs["headers"]
+        payload = http_json.call_args.kwargs["payload"]
+        self.assertEqual(headers["Accept-Language"], "zh-CN")
+        self.assertEqual(payload["client_type"], 12)
+
     def test_submit_chat_sends_skill_id_with_login_token_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             token_path = pathlib.Path(tmpdir) / "token.txt"
@@ -1233,7 +1278,7 @@ class PagepopSkillTests(unittest.TestCase):
         http_json.assert_called_once_with(
             "POST",
             "https://pc-api.pagepop.ai/api/agent-billing/v1/quotes",
-            headers=client.auth_headers("pp_sk_existing", "pagepop-skill"),
+            headers=client.request_auth_headers(config, state),
             payload={
                 "offer_set_id": "agos_123",
                 "selected_option_id": "opt_5",
@@ -1262,6 +1307,7 @@ class PagepopSkillTests(unittest.TestCase):
                 api_base_url="https://pc-api.pagepop.ai",
                 skill_id="pagepop-skill",
                 state_path=state_path,
+                package_version="source",
             )
             args = SimpleNamespace(
                 offer_set_id="",
@@ -1314,7 +1360,7 @@ class PagepopSkillTests(unittest.TestCase):
                         paywall_mode="membership_only",
                         primary_action="membership",
                         membership_offer={
-                            "url": "https://t-www.pagepop.cn/member?source=agent_paywall",
+                            "url": "https://t-www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
                             "action_text": "开通会员并继续",
                         },
                     ),
@@ -1324,6 +1370,7 @@ class PagepopSkillTests(unittest.TestCase):
                 api_base_url="https://pc-api.pagepop.ai",
                 skill_id="pagepop-skill",
                 state_path=state_path,
+                package_version="source",
             )
             args = SimpleNamespace(
                 offer_set_id="",
@@ -1435,7 +1482,7 @@ class PagepopSkillTests(unittest.TestCase):
         http_json.assert_called_once_with(
             "GET",
             "https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123",
-            headers=client.auth_headers("pp_sk_existing", "pagepop-skill"),
+            headers=client.request_auth_headers(config, state),
         )
 
     def test_get_quote_status_expands_relative_status_url(self) -> None:
@@ -1456,7 +1503,7 @@ class PagepopSkillTests(unittest.TestCase):
         http_json.assert_called_once_with(
             "GET",
             "https://pc-api.pagepop.ai/api/agent-billing/v1/quotes/agq_123",
-            headers=client.auth_headers("pp_sk_existing", "pagepop-skill"),
+            headers=client.request_auth_headers(config, state),
         )
 
     def test_pending_payment_from_api_error_expands_relative_status_url(self) -> None:
@@ -1503,7 +1550,7 @@ class PagepopSkillTests(unittest.TestCase):
                         "title": "开通会员继续生成",
                         "message": "本次任务已保存，开通后回到 agent 可继续。",
                         "action_text": "开通会员并继续",
-                        "url": "https://t-www.pagepop.cn/member?source=agent_paywall",
+                        "url": "https://t-www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
                         "sku_id": "",
                         "resume_mode": "rerun_same_command",
                     }
@@ -1526,7 +1573,10 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(pending.secondary_action, "")
         self.assertFalse(pending.payg_enabled)
         self.assertEqual(pending.payg_suppressed_reason, "global_disabled")
-        self.assertEqual(pending.membership_offer["url"], "https://t-www.pagepop.cn/member?source=agent_paywall")
+        self.assertEqual(
+            pending.membership_offer["url"],
+            "https://t-www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
+        )
         self.assertEqual(pending.membership_offer["sku_id"], "")
         self.assertEqual(pending.experiment["variant"], "membership_only")
         self.assertEqual(pending.offer_set_id, "")
@@ -1826,6 +1876,138 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(payment_calls[0].kwargs["options"][1]["image_soft_limit"], 9)
             self.assertTrue(payment_calls[0].kwargs["pause_execution"])
 
+    def test_stream_command_emits_membership_primary_paywall_with_payg_secondary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(state_path, client.SkillState(access_key="pp_sk_existing"))
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.ai",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                goal="make two images",
+                artifact_type="auto",
+                link=[],
+                conversation_id="",
+                resume_conversation_id="",
+                new_conversation=False,
+            )
+            membership_offer = {
+                "title": "开通会员继续生成",
+                "message": "获得更多积分，长期生成更划算。本次任务已保存，开通后回到 agent 可继续。",
+                "action_text": "开通会员并继续",
+                "url": "https://t-www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
+                "resume_mode": "rerun_same_command",
+            }
+            api_error = client.PagepopAPIError(
+                code=703000001,
+                message="Payment is required to continue.",
+                reason="AGENT_BILLING_PAYMENT_REQUIRED",
+                metadata={
+                    "openclaw_reason": "payment_offer_required",
+                    "paywall_version": "1",
+                    "paywall_mode": "membership_with_payg",
+                    "primary_action": "membership",
+                    "secondary_action": "payg",
+                    "payg_enabled": "true",
+                    "membership_offer": json.dumps(membership_offer),
+                    "offer_set_id": "agos_123",
+                    "options": json.dumps(
+                        [
+                            {"option_id": "light", "image_soft_limit": 2, "amount_cents": 138, "currency": "USD"},
+                        ]
+                    ),
+                    "provider": "stripe_checkout",
+                    "create_quote_endpoint": "/api/agent-billing/v1/quotes",
+                    "quote_status_url_prefix": "/api/agent-billing/v1/quotes/",
+                },
+            )
+
+            with mock.patch.object(client, "submit_chat", side_effect=api_error), mock.patch.object(
+                client,
+                "emit_event",
+            ) as emit_event, mock.patch.object(client, "emit_record"):
+                exit_code = client.run_stream_command(config, args)
+
+            self.assertEqual(exit_code, 0)
+            payment_call = next(call for call in emit_event.call_args_list if call.args[0] == "payment_required")
+            self.assertEqual(payment_call.kwargs["paywall_mode"], "membership_with_payg")
+            self.assertEqual(payment_call.kwargs["primary_action"], "membership")
+            self.assertEqual(payment_call.kwargs["secondary_action"], "payg")
+            self.assertEqual(payment_call.kwargs["action_text"], "开通会员并继续")
+            self.assertEqual(payment_call.kwargs["membership_offer"]["url"], membership_offer["url"])
+            self.assertEqual(payment_call.kwargs["recommended_action"], "membership")
+            self.assertEqual(payment_call.kwargs["payg_role"], "secondary_fallback")
+            self.assertTrue(payment_call.kwargs["payg_available"])
+            self.assertEqual(payment_call.kwargs["payg_action_text"], "仅本次付费继续")
+            self.assertIn("仅本次付费", payment_call.kwargs["payg_hint"])
+            self.assertNotIn("offer_set_id", payment_call.kwargs)
+            self.assertNotIn("options", payment_call.kwargs)
+            self.assertNotIn("create_quote_endpoint", payment_call.kwargs)
+            self.assertIn("membership", payment_call.kwargs["result_hint"].lower())
+            self.assertIn("recommended", payment_call.kwargs["result_hint"].lower())
+            self.assertIn("when the user explicitly asks", payment_call.kwargs["result_hint"].lower())
+            self.assertNotIn("--billing-session-id", payment_call.kwargs["result_hint"])
+
+    def test_payment_options_command_reveals_saved_payg_options_with_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(
+                state_path,
+                client.SkillState(
+                    access_key="pp_sk_existing",
+                    pending_payment=client.PendingPayment(
+                        paywall_mode="membership_with_payg",
+                        payg_enabled=True,
+                        offer_set_id="agos_123",
+                        provider="stripe_checkout",
+                        options=[
+                            {
+                                "option_id": "light",
+                                "label": "Light",
+                                "image_soft_limit": 2,
+                                "amount_cents": 138,
+                                "currency": "USD",
+                            },
+                            {
+                                "option_id": "standard",
+                                "label": "Standard",
+                                "image_soft_limit": 6,
+                                "amount_cents": 414,
+                                "currency": "USD",
+                                "description": "常规图文任务",
+                                "price_label": "$4.14",
+                            },
+                        ],
+                        create_quote_endpoint="/api/agent-billing/v1/quotes",
+                        quote_status_url_prefix="/api/agent-billing/v1/quotes/",
+                        custom_units_allowed=True,
+                    ),
+                ),
+            )
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.ai",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+                package_version="source",
+            )
+            args = SimpleNamespace()
+
+            with mock.patch.object(client, "emit_event") as emit_event:
+                exit_code = client.run_payment_options_command(config, args)
+
+            self.assertEqual(exit_code, 0)
+            payment_options_call = next(call for call in emit_event.call_args_list if call.args[0] == "payment_options")
+            self.assertEqual(payment_options_call.kwargs["offer_set_id"], "agos_123")
+            self.assertEqual(payment_options_call.kwargs["create_quote_endpoint"], "/api/agent-billing/v1/quotes")
+            self.assertEqual(payment_options_call.kwargs["options"][0]["option_id"], "light")
+            self.assertEqual(payment_options_call.kwargs["options"][0]["price_label"], "$1.38")
+            self.assertIn("2 张图片", payment_options_call.kwargs["options"][0]["limit_text"])
+            self.assertEqual(payment_options_call.kwargs["options"][1]["description"], "常规图文任务")
+            self.assertEqual(payment_options_call.kwargs["recommended_action"], "payg")
+            self.assertIn("仅用于当前被阻断任务", payment_options_call.kwargs["scope_text"])
+
     def test_stream_command_emits_membership_only_paywall_without_offer_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = pathlib.Path(tmpdir) / "state.json"
@@ -1847,7 +2029,7 @@ class PagepopSkillTests(unittest.TestCase):
                 "title": "开通会员继续生成",
                 "message": "本次任务已保存，开通后回到 agent 可继续。",
                 "action_text": "开通会员并继续",
-                "url": "https://t-www.pagepop.cn/member?source=agent_paywall",
+                "url": "https://t-www.pagepop.cn/?open_pricing=1&tab=annually&source=agent_paywall",
                 "sku_id": "",
                 "resume_mode": "rerun_same_command",
             }

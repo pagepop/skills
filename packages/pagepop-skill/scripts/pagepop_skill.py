@@ -26,7 +26,9 @@ DEFAULT_SKILL_ID = "pagepop-skill"
 DEFAULT_CLIENT_NAME = "openclaw"
 DEFAULT_CLIENT_VERSION = "1.0.0"
 DEFAULT_DISPLAY_APP_NAME = "OpenClaw"
-DEFAULT_CLIENT_TYPE = 11
+GLOBAL_CLIENT_TYPE = 11
+MAINLAND_CHINA_CLIENT_TYPE = 12
+DEFAULT_CLIENT_TYPE = GLOBAL_CLIENT_TYPE
 DEFAULT_VERSION = "openclaw-v1"
 DEFAULT_UPDATE_CHANNEL = "prod"
 DEFAULT_POLL_TIMEOUT_SECONDS = 600
@@ -669,6 +671,27 @@ def resolve_api_base_url(explicit_api_base_url: str, *, region: str, timezone: s
     if resolved_region == "CN":
         return MAINLAND_CHINA_API_BASE_URL
     return GLOBAL_API_BASE_URL
+
+
+def resolve_client_type(explicit_client_type: t.Any, *, region: str) -> int:
+    value = str(explicit_client_type or "").strip()
+    if value:
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise RuntimeError(f"invalid client_type: {value}") from exc
+        if parsed <= 0:
+            raise RuntimeError("client_type must be greater than 0")
+        return parsed
+    if region == "CN":
+        return MAINLAND_CHINA_CLIENT_TYPE
+    return GLOBAL_CLIENT_TYPE
+
+
+def accept_language_for_config(config: Config) -> str:
+    if config.region == "CN" or config.client_type == MAINLAND_CHINA_CLIENT_TYPE:
+        return "zh-CN"
+    return "en-US"
 
 
 def get_conversation_stream_state(state: SkillState, conversation_id: str) -> ConversationStreamState:
@@ -1814,6 +1837,7 @@ def build_config(args: argparse.Namespace) -> Config:
         artifact_dir=pathlib.Path(artifact_dir).expanduser().resolve(),
         download_artifact_images=not bool(args.no_download_images)
         and parse_env_bool("PAGEPOP_SKILL_DOWNLOAD_IMAGES", "PAGEPOP_OPENCLAW_DOWNLOAD_IMAGES", default=True),
+        client_type=resolve_client_type(args.client_type, region=resolved_region),
         timezone=timezone,
     )
 
@@ -1959,10 +1983,13 @@ def request_auth_headers(config: Config, state: SkillState) -> dict[str, str]:
             "X-Pagepop-Skill-Id": config.skill_id,
             "X-Pagepop-Client": DEFAULT_CLIENT_NAME,
             "Accept": "application/json",
+            "Accept-Language": accept_language_for_config(config),
         }
     if not state.access_key:
         raise RuntimeError("access key is missing")
-    return auth_headers(state.access_key, config.skill_id)
+    headers = auth_headers(state.access_key, config.skill_id)
+    headers["Accept-Language"] = accept_language_for_config(config)
+    return headers
 
 
 def init_auth(config: Config) -> dict[str, t.Any]:
@@ -2056,7 +2083,67 @@ def parse_payment_options(raw_options: t.Any) -> list[dict[str, t.Any]]:
         options = parsed
     if not isinstance(options, list):
         return []
-    return [item for item in options if isinstance(item, dict)]
+    return [{str(key): value for key, value in item.items()} for item in options if isinstance(item, dict)]
+
+
+def format_payment_amount_label(amount_cents: t.Any, currency: t.Any) -> str:
+    try:
+        cents = int(amount_cents)
+    except (TypeError, ValueError):
+        return ""
+    amount = f"{abs(cents) // 100}.{abs(cents) % 100:02d}"
+    sign = "-" if cents < 0 else ""
+    currency_code = str(currency or "").upper()
+    if currency_code == "CNY":
+        return f"{sign}¥{amount}"
+    if currency_code == "USD":
+        return f"{sign}${amount}"
+    if currency_code:
+        return f"{sign}{amount} {currency_code}"
+    return f"{sign}{amount}"
+
+
+def option_image_soft_limit(option: dict[str, t.Any]) -> int:
+    try:
+        value = int(option.get("image_soft_limit") or option.get("imageSoftLimit") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(value, 0)
+
+
+def payg_option_description(option_id: str, image_soft_limit: int) -> str:
+    option_id = option_id.strip().lower()
+    if option_id == "light":
+        return "适合小规模任务"
+    if option_id == "standard":
+        return "适合常规图文任务"
+    if option_id == "rich":
+        return "适合多图任务"
+    if image_soft_limit > 0:
+        return f"适合约 {image_soft_limit} 张图片规模的本次任务"
+    return "适合本次任务"
+
+
+def normalize_payg_display_options(options: list[dict[str, t.Any]]) -> list[dict[str, t.Any]]:
+    normalized: list[dict[str, t.Any]] = []
+    for option in options:
+        item = dict(option)
+        option_id = str(item.get("option_id") or item.get("id") or "").strip()
+        image_soft_limit = option_image_soft_limit(item)
+        if "display_label" not in item:
+            item["display_label"] = str(item.get("label") or option_id or "Custom").strip()
+        if "price_label" not in item:
+            item["price_label"] = format_payment_amount_label(item.get("amount_cents"), item.get("currency"))
+        if "description" not in item:
+            item["description"] = payg_option_description(option_id, image_soft_limit)
+        if "limit_text" not in item and image_soft_limit > 0:
+            item["limit_text"] = f"本次任务最多按 {image_soft_limit} 张图片规模规划"
+        if "scope_text" not in item:
+            item["scope_text"] = "仅用于当前被阻断任务，完成后不可复用"
+        if "is_soft_limit" not in item:
+            item["is_soft_limit"] = True
+        normalized.append(item)
+    return normalized
 
 
 def parse_metadata_object(raw_value: t.Any) -> dict[str, t.Any]:
@@ -2243,46 +2330,68 @@ def emit_payment_required_event(
         )
     if not action_text:
         action_text = "Choose payment option" if is_payg_offer else "Open payment page"
-    if is_membership_paywall and not pending_payment.offer_set_id:
-        result_hint = "Open the membership URL, then rerun this PagePop command without changing the request."
+    if is_membership_paywall and not pending_payment.quote_id:
+        if pending_payment.offer_set_id:
+            result_hint = (
+                "Recommended action: open the membership URL and choose a membership plan to continue. "
+                "PAYG is only a secondary fallback when the user explicitly asks to pay only for this one run."
+            )
+        else:
+            result_hint = (
+                "Recommended action: open the membership URL, choose a membership plan, "
+                "then rerun this PagePop command without changing the request."
+            )
     elif is_payg_offer:
         result_hint = "After payment succeeds, rerun this PagePop command with --billing-session-id."
     else:
         result_hint = "After payment succeeds, rerun this PagePop command without changing the request."
-    emit_event(
-        "payment_required",
-        paywall_version=pending_payment.paywall_version,
-        paywall_mode=pending_payment.paywall_mode,
-        primary_action=pending_payment.primary_action,
-        secondary_action=pending_payment.secondary_action,
-        membership_offer=membership_offer,
-        payg_enabled=pending_payment.payg_enabled,
-        payg_suppressed_reason=pending_payment.payg_suppressed_reason,
-        experiment=pending_payment.experiment,
-        quote_id=pending_payment.quote_id,
-        provider=pending_payment.provider,
-        payment_url=pending_payment.payment_url,
-        status_url=pending_payment.status_url,
-        amount=pending_payment.amount,
-        currency=pending_payment.currency,
-        estimated_units=pending_payment.estimated_units,
-        capability=pending_payment.capability,
-        offer_set_id=pending_payment.offer_set_id,
-        options=pending_payment.options,
-        quote_endpoint=pending_payment.quote_endpoint,
-        quote_status_endpoint=pending_payment.quote_status_endpoint,
-        create_quote_endpoint=pending_payment.create_quote_endpoint,
-        quote_status_url_prefix=pending_payment.quote_status_url_prefix,
-        custom_units_allowed=pending_payment.custom_units_allowed,
-        expires_at=pending_payment.expires_at,
-        title=title,
-        message=message,
-        backend_message=exc.message if exc else "",
-        action_text=action_text,
-        result_hint=result_hint,
-        pause_execution=True,
-        resume_mode="rerun_same_command",
-    )
+    hide_payg_details = bool(is_membership_paywall and pending_payment.offer_set_id and not pending_payment.quote_id)
+    payload: dict[str, t.Any] = {
+        "paywall_version": pending_payment.paywall_version,
+        "paywall_mode": pending_payment.paywall_mode,
+        "primary_action": pending_payment.primary_action,
+        "secondary_action": pending_payment.secondary_action,
+        "recommended_action": "membership" if is_membership_paywall else ("payg" if is_payg_offer else "payment"),
+        "payg_role": "secondary_fallback" if is_membership_paywall and pending_payment.offer_set_id else "",
+        "membership_offer": membership_offer,
+        "payg_enabled": pending_payment.payg_enabled,
+        "payg_suppressed_reason": pending_payment.payg_suppressed_reason,
+        "experiment": pending_payment.experiment,
+        "quote_id": pending_payment.quote_id,
+        "provider": pending_payment.provider,
+        "payment_url": pending_payment.payment_url,
+        "status_url": pending_payment.status_url,
+        "amount": pending_payment.amount,
+        "currency": pending_payment.currency,
+        "estimated_units": pending_payment.estimated_units,
+        "capability": pending_payment.capability,
+        "expires_at": pending_payment.expires_at,
+        "title": title,
+        "message": message,
+        "backend_message": exc.message if exc else "",
+        "action_text": action_text,
+        "result_hint": result_hint,
+        "pause_execution": True,
+        "resume_mode": "rerun_same_command",
+    }
+    if hide_payg_details:
+        payload.update(
+            payg_available=True,
+            payg_action_text="仅本次付费继续",
+            payg_hint="如果只想完成本次任务，可明确选择“仅本次付费”后再查看单次付费选项。",
+            payg_options_command="payment-options",
+        )
+    else:
+        payload.update(
+            offer_set_id=pending_payment.offer_set_id,
+            options=pending_payment.options,
+            quote_endpoint=pending_payment.quote_endpoint,
+            quote_status_endpoint=pending_payment.quote_status_endpoint,
+            create_quote_endpoint=pending_payment.create_quote_endpoint,
+            quote_status_url_prefix=pending_payment.quote_status_url_prefix,
+            custom_units_allowed=pending_payment.custom_units_allowed,
+        )
+    emit_event("payment_required", **payload)
 
 
 def can_pause_for_payment_required(pending_payment: PendingPayment) -> bool:
@@ -3211,6 +3320,39 @@ def run_create_quote_command(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def run_payment_options_command(config: Config, args: argparse.Namespace) -> int:
+    emit_skill_update_event(config)
+    state = load_state(config.state_path)
+    pending_payment = state.pending_payment
+    if pending_payment is None:
+        raise RuntimeError("no saved payment offer; rerun the blocked PagePop command first")
+    if not pending_payment.offer_set_id:
+        membership_url = str(pending_payment.membership_offer.get("url", "")).strip()
+        if membership_url:
+            raise RuntimeError(f"PAYG is not available for this saved paywall; open membership URL: {membership_url}")
+        raise RuntimeError("PAYG is not available for this saved paywall")
+    options = normalize_payg_display_options(pending_payment.options)
+    emit_event(
+        "payment_options",
+        recommended_action="payg",
+        payg_role="secondary_fallback",
+        offer_set_id=pending_payment.offer_set_id,
+        provider=pending_payment.provider,
+        options=options,
+        create_quote_endpoint=pending_payment.create_quote_endpoint,
+        quote_status_url_prefix=pending_payment.quote_status_url_prefix,
+        custom_units_allowed=pending_payment.custom_units_allowed,
+        expires_at=pending_payment.expires_at,
+        title="仅本次付费继续",
+        message="选择一个单次付费档位后创建支付单。本入口只用于当前被阻断任务。",
+        scope_text="仅用于当前被阻断任务，完成后不可复用",
+        result_hint="Ask the user to choose one PAYG option, then run create-quote with the selected option id.",
+        pause_execution=True,
+        resume_mode="create_quote_then_rerun_same_command",
+    )
+    return 0
+
+
 def run_quote_status_command(config: Config, args: argparse.Namespace) -> int:
     emit_skill_update_event(config)
     state = load_state(config.state_path)
@@ -3270,6 +3412,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional user region or country code; mainland China uses pagepop.cn, other regions use pagepop.ai",
     )
     parser.add_argument(
+        "--client-type",
+        default=env_value("PAGEPOP_SKILL_CLIENT_TYPE", "PAGEPOP_OPENCLAW_CLIENT_TYPE"),
+        help="Optional PagePop client_type override; defaults to 12 for mainland China and 11 otherwise",
+    )
+    parser.add_argument(
         "--client-version",
         default=env_value("PAGEPOP_SKILL_CLIENT_VERSION", "PAGEPOP_OPENCLAW_CLIENT_VERSION", default=DEFAULT_CLIENT_VERSION),
         help="Client version sent to auth/init",
@@ -3322,6 +3469,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status", help="Print masked local state")
     subparsers.add_parser("conversations", help="List saved local conversations for switch-chat flows")
     subparsers.add_parser("clear-state", help="Delete local state file")
+    subparsers.add_parser(
+        "payment-options",
+        help="Show saved PAYG options after the user explicitly asks to pay only for the current run",
+    )
 
     create_quote_parser = subparsers.add_parser("create-quote", help="Create a paid PagePop quote from a saved offer")
     create_quote_parser.add_argument(
@@ -3409,6 +3560,8 @@ def main(argv: t.Optional[list[str]] = None) -> int:
             return run_conversations_command(config)
         if args.command == "clear-state":
             return run_clear_state_command(config)
+        if args.command == "payment-options":
+            return run_payment_options_command(config, args)
         if args.command == "create-quote":
             return run_create_quote_command(config, args)
         if args.command == "quote-status":
