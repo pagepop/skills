@@ -2335,7 +2335,8 @@ def emit_payment_required_event(
     pending_payment: PendingPayment,
     exc: t.Optional[PagepopAPIError] = None,
 ) -> None:
-    membership_offer = pending_payment.membership_offer if isinstance(pending_payment.membership_offer, dict) else {}
+    raw_membership_offer = pending_payment.membership_offer if isinstance(pending_payment.membership_offer, dict) else {}
+    membership_offer = dict(raw_membership_offer)
     is_payg_offer = bool(pending_payment.offer_set_id and not pending_payment.quote_id)
     is_membership_paywall = bool(pending_payment.paywall_mode or membership_offer)
     title = str(membership_offer.get("title", "")).strip() if is_membership_paywall else ""
@@ -2356,16 +2357,27 @@ def emit_payment_required_event(
             message,
             pending_payment.available_points_text,
         )
+        if membership_offer:
+            membership_offer["message"] = message
     if not action_text:
         action_text = "Choose payment option" if is_payg_offer else "Open payment page"
     if is_membership_paywall and not pending_payment.quote_id:
+        points_hint = (
+            f" Include this user-facing point context: {pending_payment.available_points_text}."
+            if pending_payment.available_points_text
+            else ""
+        )
         if pending_payment.offer_set_id:
             result_hint = (
+                "First tell the user that PagePop paused because the account has insufficient points."
+                f"{points_hint} "
                 "Recommended action: open the membership URL and choose a membership plan to continue. "
                 "PAYG is only a secondary fallback when the user explicitly asks to pay only for this one run."
             )
         else:
             result_hint = (
+                "First tell the user that PagePop paused because the account has insufficient points."
+                f"{points_hint} "
                 "Recommended action: open the membership URL, choose a membership plan, "
                 "then rerun this PagePop command without changing the request."
             )

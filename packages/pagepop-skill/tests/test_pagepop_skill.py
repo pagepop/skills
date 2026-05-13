@@ -1944,6 +1944,8 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(payment_call.kwargs["action_text"], "开通会员并继续")
             self.assertEqual(payment_call.kwargs["membership_offer"]["url"], membership_offer["url"])
             self.assertNotIn("_", payment_call.kwargs["membership_offer"]["url"])
+            self.assertIn("当前账号可用积分不足", payment_call.kwargs["membership_offer"]["message"])
+            self.assertIn("当前可用积分：0", payment_call.kwargs["membership_offer"]["message"])
             self.assertEqual(payment_call.kwargs["insufficient_reason_text"], "当前账号可用积分不足，PagePop 已暂停本次生成。")
             self.assertEqual(payment_call.kwargs["available_points_text"], "当前可用积分：0")
             self.assertIn("当前账号可用积分不足", payment_call.kwargs["message"])
@@ -1959,6 +1961,7 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertIn("membership", payment_call.kwargs["result_hint"].lower())
             self.assertIn("recommended", payment_call.kwargs["result_hint"].lower())
             self.assertIn("when the user explicitly asks", payment_call.kwargs["result_hint"].lower())
+            self.assertIn("insufficient points", payment_call.kwargs["result_hint"].lower())
             self.assertNotIn("--billing-session-id", payment_call.kwargs["result_hint"])
 
     def test_payment_options_command_reveals_saved_payg_options_with_copy(self) -> None:
@@ -2089,6 +2092,8 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(payment_call.kwargs["payg_suppressed_reason"], "global_disabled")
             self.assertEqual(payment_call.kwargs["membership_offer"]["url"], membership_offer["url"])
             self.assertNotIn("_", payment_call.kwargs["membership_offer"]["url"])
+            self.assertIn("当前账号可用积分不足", payment_call.kwargs["membership_offer"]["message"])
+            self.assertIn("当前可用积分：0", payment_call.kwargs["membership_offer"]["message"])
             self.assertEqual(payment_call.kwargs["insufficient_reason_text"], "当前账号可用积分不足，PagePop 已暂停本次生成。")
             self.assertEqual(payment_call.kwargs["available_points_text"], "当前可用积分：0")
             self.assertIn("当前账号可用积分不足", payment_call.kwargs["message"])

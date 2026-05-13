@@ -224,13 +224,14 @@ SSE offset 是当前服务端队列缓存内的 cursor，不是 conversation 维
 
 用户 agent 流程：
 
-1. 先展示 `membership_offer` 作为主路径。
-2. 如果 `paywall_mode=membership_only` 或 `payg_available` 不是 true，不要调用 `create-quote`；用户开通会员后回到 agent 继续，skill 会重放已保存的 `pending_run`。
-3. 如果 `payg_available=true`，PAYG 仍只是次级 fallback；不要默认展示价格和档位。
-4. 用户明确选择“仅本次付费”后，运行 `payment-options` 展示 `options`，再调用 `create-quote` 创建 quote。
-5. 引导用户打开返回的 `payment_url` 完成支付。
-6. 轮询 `GET /api/agent-billing/v1/quotes/{quote_id}`。
-7. `status=paid` 后，拿 `session_id` 重试原来的 `/v2/chat`，请求头带 `X-Pagepop-Billing-Session: <session_id>`。
+1. 先告诉用户 PagePop 因当前账号积分不足暂停了本次生成；如事件中有 `available_points_text`，一并展示。
+2. 再展示 `membership_offer` 作为主路径。
+3. 如果 `paywall_mode=membership_only` 或 `payg_available` 不是 true，不要调用 `create-quote`；用户开通会员后回到 agent 继续，skill 会重放已保存的 `pending_run`。
+4. 如果 `payg_available=true`，PAYG 仍只是次级 fallback；不要默认展示价格和档位。
+5. 用户明确选择“仅本次付费”后，运行 `payment-options` 展示 `options`，再调用 `create-quote` 创建 quote。
+6. 引导用户打开返回的 `payment_url` 完成支付。
+7. 轮询 `GET /api/agent-billing/v1/quotes/{quote_id}`。
+8. `status=paid` 后，拿 `session_id` 重试原来的 `/v2/chat`，请求头带 `X-Pagepop-Billing-Session: <session_id>`。
 
 paid session 只用于该次支付对应的第一轮真正 `/v2/chat` 执行。后端会绑定本轮并注入 hidden prompt；skill/用户 agent 不要跨多轮复用同一个 `session_id`。这轮第一次 `finish_work` 后 session 即结束。
 
@@ -556,7 +557,7 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
   "secondary_action": "payg",
   "membership_offer": {
     "title": "开通会员继续生成",
-    "message": "本次任务已保存，开通后回到 agent 可继续。",
+    "message": "当前账号可用积分不足，PagePop 已暂停本次生成。\n本次任务已保存，开通后回到 agent 可继续。\n当前可用积分：0",
     "action_text": "开通会员并继续",
     "url": "https://www.pagepop.cn/?pricing=1&tab=annually&source=agentpaywall",
     "sku_id": "",
@@ -583,7 +584,7 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
   "action_text": "开通会员并继续",
   "recommended_action": "membership",
   "payg_role": "secondary_fallback",
-  "result_hint": "Recommended action: open the membership URL and choose a membership plan to continue. PAYG is only a secondary fallback when the user explicitly asks to pay only for this one run.",
+  "result_hint": "First tell the user that PagePop paused because the account has insufficient points. Include this user-facing point context: 当前可用积分：0. Recommended action: open the membership URL and choose a membership plan to continue. PAYG is only a secondary fallback when the user explicitly asks to pay only for this one run.",
   "pause_execution": true,
   "resume_mode": "rerun_same_command"
 }
@@ -600,7 +601,7 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
   "secondary_action": "",
   "membership_offer": {
     "title": "开通会员继续生成",
-    "message": "本次任务已保存，开通后回到 agent 可继续。",
+    "message": "当前账号可用积分不足，PagePop 已暂停本次生成。\n本次任务已保存，开通后回到 agent 可继续。\n当前可用积分：0",
     "action_text": "开通会员并继续",
     "url": "https://www.pagepop.cn/?pricing=1&tab=annually&source=agentpaywall",
     "sku_id": "",
@@ -617,7 +618,7 @@ python3 scripts/pagepop_skill.py resume-stream --conversation-id conv_xxx
 }
 ```
 
-宿主应始终优先展示 `membership_offer` 作为主入口。仅当用户明确选择“仅本次付费”时，才运行 `payment-options` 展示已保存的次级 PAYG 档位：
+宿主应先展示积分不足原因和当前可用积分，再将 `membership_offer` 作为主入口。仅当用户明确选择“仅本次付费”时，才运行 `payment-options` 展示已保存的次级 PAYG 档位：
 
 ```bash
 python3 scripts/pagepop_skill.py payment-options
