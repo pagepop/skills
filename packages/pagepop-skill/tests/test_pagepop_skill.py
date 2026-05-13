@@ -1139,7 +1139,7 @@ class PagepopSkillTests(unittest.TestCase):
                 artifact_dir=pathlib.Path(tmpdir) / ".pagepop-artifacts",
             )
 
-            with mock.patch.object(client.urllib.request, "urlopen", return_value=FakeImageResponse()):
+            with mock.patch.object(client.urllib.request, "urlopen", return_value=FakeImageResponse()) as urlopen_mock:
                 attachment = client.download_image_attachment(
                     config,
                     conversation_id="conv-1",
@@ -1147,6 +1147,12 @@ class PagepopSkillTests(unittest.TestCase):
                     index=1,
                 )
 
+            request = urlopen_mock.call_args.args[0]
+            request_headers = {key.lower(): value for key, value in request.header_items()}
+            self.assertEqual(request.get_method(), "GET")
+            self.assertIn("Mozilla/5.0", request_headers["user-agent"])
+            self.assertIn("image/avif", request_headers["accept"])
+            self.assertIn("zh-CN", request_headers["accept-language"])
             self.assertEqual(attachment["label"], "封面")
             self.assertEqual(attachment["mime_type"], "image/png")
             self.assertEqual(pathlib.Path(attachment["local_path"]).read_bytes(), b"fake-png")

@@ -36,6 +36,11 @@ DEFAULT_STREAM_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_STREAM_RECONNECTS = 5
 DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 30
 DEFAULT_MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024
+IMAGE_DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 HEARTBEAT_PROGRESS_INTERVAL_SECONDS = 15
 URL_TEXT_RE = re.compile(r"https?://[^\s<>()\"']+")
 MAINLAND_CHINA_REGION_VALUES = {
@@ -2733,6 +2738,14 @@ def image_mime_type_for_path(path: pathlib.Path, content_type: str = "") -> str:
     return guessed or "application/octet-stream"
 
 
+def image_download_headers() -> dict[str, str]:
+    return {
+        "User-Agent": IMAGE_DOWNLOAD_USER_AGENT,
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+
+
 def build_image_attachment_label(index: int) -> str:
     if index == 1:
         return "封面"
@@ -2752,7 +2765,7 @@ def download_image_attachment(config: Config, *, conversation_id: str, url: str,
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
     conversation_dir = config.artifact_dir / safe_path_part(conversation_id, "conversation")
     ensure_parent_dir(conversation_dir / "placeholder")
-    req = urllib.request.Request(url, headers={"Accept": "image/*"}, method="GET")
+    req = urllib.request.Request(url, headers=image_download_headers(), method="GET")
     try:
         with urllib.request.urlopen(req, timeout=config.image_download_timeout_seconds) as resp:
             content_type = resp.headers.get("Content-Type", "")
