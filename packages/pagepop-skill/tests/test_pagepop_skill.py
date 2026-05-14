@@ -106,6 +106,74 @@ class PagepopSkillTests(unittest.TestCase):
         self.assertEqual(auth_required_call.kwargs["pause_execution"], True)
         self.assertEqual(auth_required_call.kwargs["resume_mode"], "rerun_same_command")
 
+    def test_skill_context_headers_include_region_and_api_base(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.cn",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+            region="CN",
+        )
+
+        self.assertEqual(
+            client.skill_context_headers(config),
+            {
+                "X-Pagepop-User-Region": "CN",
+                "X-Pagepop-Skill-Api-Base": "https://pc-api.pagepop.cn",
+            },
+        )
+
+    def test_init_auth_sends_region_context_headers(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.cn",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+            region="CN",
+            source_app="feishu",
+            display_app_name="飞书",
+        )
+
+        with mock.patch.object(client, "http_json", return_value={}) as http_json:
+            client.init_auth(config)
+
+        self.assertEqual(http_json.call_args.args[0], "POST")
+        self.assertEqual(http_json.call_args.args[1], "https://pc-api.pagepop.cn/v1/openclaw/auth/init")
+        self.assertEqual(
+            http_json.call_args.kwargs["headers"],
+            {
+                "X-Pagepop-User-Region": "CN",
+                "X-Pagepop-Skill-Api-Base": "https://pc-api.pagepop.cn",
+            },
+        )
+
+    def test_submit_chat_includes_region_context_meta(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.cn",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+            region="CN",
+        )
+        state = client.SkillState(access_key="pp_sk_test")
+
+        with mock.patch.object(client, "http_json", return_value={"conversation_id": "conv-test"}) as http_json:
+            client.submit_chat(
+                config,
+                state,
+                goal="生成一张图",
+                artifact_type="image",
+                links=[],
+            )
+
+        payload = http_json.call_args.kwargs["payload"]
+        self.assertEqual(payload["meta"]["skill_region"], "CN")
+        self.assertEqual(payload["meta"]["skill_api_base_url"], "https://pc-api.pagepop.cn")
+        self.assertEqual(http_json.call_args.kwargs["headers"]["X-Pagepop-User-Region"], "CN")
+
+    def test_public_skill_doc_does_not_expose_test_domains(self) -> None:
+        skill_doc = (SCRIPT_DIR.parents[0] / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("t-pc-api", skill_doc)
+        self.assertNotIn("t-www", skill_doc)
+
     def test_normalize_authorize_url_rewrites_localhost_from_production_api(self) -> None:
         config = client.Config(
             api_base_url="https://pc-api.pagepop.ai",
@@ -251,6 +319,7 @@ class PagepopSkillTests(unittest.TestCase):
         http_json.assert_called_once_with(
             "POST",
             "https://pc-api.pagepop.cn/v1/openclaw/auth/init",
+            headers={"X-Pagepop-Skill-Api-Base": "https://pc-api.pagepop.cn"},
             payload={
                 "skill_id": "pagepop-skill",
                 "client_name": client.DEFAULT_CLIENT_NAME,
@@ -417,6 +486,88 @@ class PagepopSkillTests(unittest.TestCase):
                 "After authorization, return to the source app and continue the current request.",
             )
             self.assertEqual(access_key_reset_call.kwargs["is_reauth"], True)
+
+    def test_stream_membership_paywall_saves_pending_run_and_emits_payment_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = pathlib.Path(tmpdir) / "state.json"
+            client.save_state(state_path, client.SkillState(access_key="pp_sk_existing"))
+            config = client.Config(
+                api_base_url="https://pc-api.pagepop.cn",
+                skill_id="pagepop-skill",
+                state_path=state_path,
+            )
+            args = SimpleNamespace(
+                goal="生成一篇小红书，内容是奶牛猫",
+                artifact_type="post",
+                link=["https://example.com/ref"],
+                conversation_id="",
+                resume_conversation_id="",
+                new_conversation=False,
+            )
+            paywall_error = client.PagepopAPIError(
+                code=701000004,
+                message="points not enough",
+                reason="POINTS_X_BALANCE_NOT_ENOUGH",
+                metadata={
+                    "openclaw_reason": "payment_offer_required",
+                    "paywall_version": "1",
+                    "paywall_mode": "membership_only",
+                    "primary_action": "membership",
+                    "payg_enabled": "false",
+                    "payg_suppressed_reason": "not_launched",
+                    "insufficient_reason_text": "Insufficient spendable points.",
+                    "available_points_text": "Available spendable points: 0",
+                    "membership_offer": json.dumps(
+                        {
+                            "url": "https://www.pagepop.cn/?pricing=1&source=agentpaywall&tab=annually",
+                            "action_text": "Open PagePop membership",
+                            "title": "PagePop membership required",
+                            "message": "Open membership to continue.",
+                            "source": "agentpaywall",
+                        }
+                    ),
+                },
+            )
+
+            with mock.patch.object(client, "get_skill_update", return_value={}), mock.patch.object(
+                client,
+                "submit_chat",
+                side_effect=paywall_error,
+            ), mock.patch.object(client, "stream_sse_events") as stream_sse_events, mock.patch.object(
+                client, "emit_event"
+            ) as emit_event:
+                self.assertEqual(client.run_stream_command(config, args), 0)
+
+            stream_sse_events.assert_not_called()
+            payment_call = next(call for call in emit_event.call_args_list if call.args[0] == "payment_required")
+            self.assertEqual(payment_call.kwargs["status_text"], "需要开通会员")
+            self.assertEqual(payment_call.kwargs["reason_text"], "可用积分不足")
+            self.assertEqual(payment_call.kwargs["title"], "PagePop 可用积分不足")
+            self.assertEqual(
+                payment_call.kwargs["message"],
+                "当前账号可用积分为 0，暂时无法继续生成。请开通 PagePop 会员后，回到当前 Agent 继续本次请求，无需重新输入 prompt。",
+            )
+            self.assertEqual(payment_call.kwargs["action_text"], "开通 PagePop 会员")
+            self.assertEqual(payment_call.kwargs["available_points"], 0)
+            self.assertEqual(payment_call.kwargs["available_points_text"], "可用积分：0")
+            self.assertEqual(payment_call.kwargs["paywall_mode"], "membership_only")
+            self.assertEqual(payment_call.kwargs["primary_action"], "membership")
+            self.assertEqual(payment_call.kwargs["payg_enabled"], False)
+            self.assertEqual(
+                payment_call.kwargs["membership_offer"]["url"],
+                "https://www.pagepop.cn/?pricing=1&source=agentpaywall&tab=annually",
+            )
+            self.assertEqual(payment_call.kwargs["membership_offer"]["action_text"], "开通 PagePop 会员")
+            self.assertNotIn("spendable", payment_call.kwargs["message"])
+            self.assertNotIn("点数", payment_call.kwargs["message"])
+            self.assertIn("display_guidance", payment_call.kwargs)
+            self.assertIn("payment_required", payment_call.kwargs["display_guidance"]["do_not_display_fields"])
+
+            next_state = client.load_state(state_path)
+            self.assertIsNotNone(next_state.pending_run)
+            assert next_state.pending_run is not None
+            self.assertEqual(next_state.pending_run.goal, "生成一篇小红书，内容是奶牛猫")
+            self.assertEqual(next_state.pending_run.links, ["https://example.com/ref"])
 
     def test_stream_reuses_active_conversation_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1153,6 +1304,78 @@ class PagepopSkillTests(unittest.TestCase):
             client.unwrap_base_response(raw)
         self.assertEqual(ctx.exception.openclaw_reason, "SKILL_KEY_EXPIRED")
         self.assertTrue(ctx.exception.should_reset_access_key())
+
+    def test_unwrap_base_response_error_reads_meta_data(self) -> None:
+        raw = json.dumps(
+            {
+                "code": 701000004,
+                "message": "points not enough",
+                "reason": "POINTS_X_BALANCE_NOT_ENOUGH",
+                "meta_data": {"openclaw_reason": "payment_offer_required"},
+            }
+        ).encode("utf-8")
+        with self.assertRaises(client.PagepopAPIError) as ctx:
+            client.unwrap_base_response(raw)
+        self.assertEqual(ctx.exception.openclaw_reason, "payment_offer_required")
+
+    def test_build_payment_required_event_membership_only_without_offer_set_id(self) -> None:
+        pending_run = client.PendingRun(goal="生成一篇小红书", artifact_type="post")
+        exc = client.PagepopAPIError(
+            code=701000004,
+            message="points not enough",
+            reason="POINTS_X_BALANCE_NOT_ENOUGH",
+            metadata={
+                "openclaw_reason": "payment_offer_required",
+                "paywall_version": "1",
+                "paywall_mode": "membership_only",
+                "primary_action": "membership",
+                "payg_enabled": "false",
+                "payg_suppressed_reason": "not_launched",
+                "insufficient_reason_text": "Insufficient spendable points.",
+                "available_points_text": "Available spendable points: 0",
+                "membership_offer": json.dumps(
+                    {
+                        "url": "https://www.pagepop.cn/?pricing=1&source=agentpaywall&tab=annually",
+                        "action_text": "Open PagePop membership",
+                        "title": "PagePop membership required",
+                        "message": "Open membership to continue.",
+                        "source": "agentpaywall",
+                    }
+                ),
+            },
+        )
+
+        event = client.build_payment_required_event(exc, pending_run)
+
+        self.assertEqual(event["reason"], "payment_offer_required")
+        self.assertEqual(event["status_text"], "需要开通会员")
+        self.assertEqual(event["reason_text"], "可用积分不足")
+        self.assertEqual(event["title"], "PagePop 可用积分不足")
+        self.assertEqual(
+            event["message"],
+            "当前账号可用积分为 0，暂时无法继续生成。请开通 PagePop 会员后，回到当前 Agent 继续本次请求，无需重新输入 prompt。",
+        )
+        self.assertEqual(event["action_text"], "开通 PagePop 会员")
+        self.assertEqual(event["available_points"], 0)
+        self.assertEqual(event["available_points_text"], "可用积分：0")
+        self.assertEqual(event["paywall_mode"], "membership_only")
+        self.assertEqual(event["primary_action"], "membership")
+        self.assertEqual(event["payg_enabled"], False)
+        self.assertEqual(event["payg_suppressed_reason"], "not_launched")
+        self.assertEqual(
+            event["membership_offer"]["url"],
+            "https://www.pagepop.cn/?pricing=1&source=agentpaywall&tab=annually",
+        )
+        self.assertEqual(event["membership_offer"]["action_text"], "开通 PagePop 会员")
+        self.assertEqual(event["pending_run"]["goal"], "生成一篇小红书")
+        self.assertIn("display_guidance", event)
+        self.assertEqual(event["display_guidance"]["preferred_language"], "zh-CN")
+        self.assertIn("payment_offer_required", event["display_guidance"]["do_not_display_fields"])
+        self.assertIn("backend_metadata", event)
+        self.assertNotIn("spendable", event["message"])
+        self.assertNotIn("点数", event["message"])
+        self.assertNotIn("offer_set_id", event)
+        self.assertNotIn("payg_options", event)
 
     def test_http_json_reports_non_json_http_error_preview(self) -> None:
         error = urllib.error.HTTPError(

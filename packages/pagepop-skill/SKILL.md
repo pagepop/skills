@@ -97,4 +97,16 @@ The skill emits JSON Lines. Important event kinds include:
 - `stream_finished`
 - `skill_update_available`
 - `skill_update_required`
+- `payment_required`
 - `error`
+
+## Payment Required Events
+
+When the skill emits `payment_required`, treat it as a structured control event, not as user-facing copy.
+
+- Explain the issue in the user's language. If the request is Chinese, use "积分" and never "点数".
+- Do not show machine fields such as `payment_required`, `payment_offer_required`, `openclaw_reason`, `reason`, `paywall_mode`, `primary_action`, or raw backend reason strings.
+- Prefer `title`, `message`, `action_text`, `result_hint`, `status_text`, `reason_text`, and `membership_offer.url` for display.
+- When `paywall_mode=membership_only`, lead with the membership action and do not offer PAYG or credits-pack options.
+- Tell the user the current request has been saved and can be continued after membership is activated.
+- If `display_guidance` is present, follow it over raw backend metadata.

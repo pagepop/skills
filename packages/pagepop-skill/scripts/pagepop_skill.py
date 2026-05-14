@@ -87,6 +87,8 @@ KEY_RESET_REASONS = {
     "SKILL_KEY_EXPIRED",
     "MEMBERSHIP_REQUIRED",
 }
+PAYMENT_OFFER_REQUIRED_REASON = "payment_offer_required"
+PAYWALL_MODE_MEMBERSHIP_ONLY = "membership_only"
 
 TERMINAL_CONTROL_COMMANDS = {"done", "error", "manual_retry", "cancled"}
 
@@ -125,6 +127,201 @@ class PagepopAPIError(RuntimeError):
             "metadata": self.metadata,
             "data": self.data,
         }
+
+
+def metadata_string(metadata: dict[str, t.Any], key: str, default: str = "") -> str:
+    value = metadata.get(key)
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def metadata_bool(metadata: dict[str, t.Any], key: str, default: bool = False) -> bool:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def metadata_int(metadata: dict[str, t.Any], key: str, default: int = 0) -> int:
+    value = metadata.get(key)
+    if value is None:
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_membership_offer(raw: t.Any) -> dict[str, t.Any]:
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        raw = parsed
+    if not isinstance(raw, dict):
+        return {}
+    offer = dict(raw)
+    for key in ("url", "action_text", "title", "message", "source"):
+        if key in offer and offer[key] is not None:
+            offer[key] = str(offer[key]).strip()
+    return offer
+
+
+def is_membership_paywall_error(exc: PagepopAPIError) -> bool:
+    if exc.openclaw_reason != PAYMENT_OFFER_REQUIRED_REASON:
+        return False
+    paywall_mode = metadata_string(exc.metadata, "paywall_mode", PAYWALL_MODE_MEMBERSHIP_ONLY)
+    return paywall_mode == PAYWALL_MODE_MEMBERSHIP_ONLY
+
+
+def contains_cjk(value: str) -> bool:
+    return any(
+        "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+        for char in value
+    )
+
+
+def clean_backend_display_text(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    blocked_fragments = (
+        "spendable points",
+        "payment_required",
+        "payment_offer_required",
+    )
+    lowered = value.lower()
+    if any(fragment in lowered for fragment in blocked_fragments):
+        return ""
+    return value
+
+
+def membership_paywall_display_copy(
+    exc: PagepopAPIError,
+    pending_run: PendingRun,
+    metadata: dict[str, t.Any],
+    membership_offer: dict[str, t.Any],
+) -> dict[str, t.Any]:
+    available_points = metadata_int(metadata, "available_points", 0)
+    chinese = contains_cjk(pending_run.goal)
+    if chinese:
+        return {
+            "preferred_language": "zh-CN",
+            "status_text": "需要开通会员",
+            "reason_text": "可用积分不足",
+            "title": "PagePop 可用积分不足",
+            "message": (
+                f"当前账号可用积分为 {available_points}，暂时无法继续生成。"
+                "请开通 PagePop 会员后，回到当前 Agent 继续本次请求，无需重新输入 prompt。"
+            ),
+            "action_text": "开通 PagePop 会员",
+            "result_hint": "开通会员后，回到当前 Agent 继续本次请求，无需重新输入 prompt。",
+            "available_points_text": f"可用积分：{available_points}",
+            "available_points": available_points,
+        }
+
+    title = first_non_empty(
+        clean_backend_display_text(metadata_string(metadata, "title_text")),
+        clean_backend_display_text(str(membership_offer.get("title", "")).strip()),
+        "PagePop credits required",
+    )
+    message = first_non_empty(
+        clean_backend_display_text(metadata_string(metadata, "message_text")),
+        clean_backend_display_text(str(membership_offer.get("message", "")).strip()),
+        clean_backend_display_text(exc.message),
+        "Your available PagePop credits are insufficient. Activate membership to continue this agent run.",
+    )
+    action_text = first_non_empty(
+        clean_backend_display_text(metadata_string(metadata, "action_text")),
+        clean_backend_display_text(str(membership_offer.get("action_text", "")).strip()),
+        "Open PagePop membership",
+    )
+    result_hint = first_non_empty(
+        clean_backend_display_text(metadata_string(metadata, "result_hint_text")),
+        "After activating membership, return to the agent and continue this request without re-entering the prompt.",
+    )
+    return {
+        "preferred_language": "en",
+        "status_text": "Membership required",
+        "reason_text": "Insufficient credits",
+        "title": title,
+        "message": message,
+        "action_text": action_text,
+        "result_hint": result_hint,
+        "available_points_text": first_non_empty(
+            clean_backend_display_text(metadata_string(metadata, "available_points_text")),
+            f"Available credits: {available_points}",
+        ),
+        "available_points": available_points,
+    }
+
+
+def build_payment_display_guidance(copy: dict[str, t.Any]) -> dict[str, t.Any]:
+    return {
+        "preferred_language": copy["preferred_language"],
+        "lead_with": "membership",
+        "continue_pending_run": True,
+        "do_not_offer_payg": True,
+        "do_not_display_fields": [
+            "payment_required",
+            "payment_offer_required",
+            "openclaw_reason",
+            "reason",
+            "paywall_mode",
+            "primary_action",
+            "backend_message",
+            "backend_metadata",
+        ],
+        "terminology": {
+            "zh-CN": {"credits": "积分", "avoid": ["点数"]},
+            "en": {"credits": "credits", "avoid": ["spendable points"]},
+        },
+    }
+
+
+def build_payment_required_event(exc: PagepopAPIError, pending_run: PendingRun) -> dict[str, t.Any]:
+    metadata = exc.metadata or {}
+    membership_offer = parse_membership_offer(metadata.get("membership_offer"))
+    copy = membership_paywall_display_copy(exc, pending_run, metadata, membership_offer)
+    membership_offer["action_text"] = copy["action_text"]
+    membership_offer["title"] = copy["title"]
+    membership_offer["message"] = copy["message"]
+
+    return {
+        "reason": exc.openclaw_reason or exc.reason,
+        "code": exc.code,
+        "status_text": copy["status_text"],
+        "reason_text": copy["reason_text"],
+        "message": copy["message"],
+        "backend_message": exc.message,
+        "title": copy["title"],
+        "action_text": copy["action_text"],
+        "result_hint": copy["result_hint"],
+        "requires_user_action": True,
+        "pause_execution": True,
+        "resume_mode": "continue_pending_run",
+        "paywall_version": metadata_string(metadata, "paywall_version", "1"),
+        "paywall_mode": metadata_string(metadata, "paywall_mode", PAYWALL_MODE_MEMBERSHIP_ONLY),
+        "primary_action": metadata_string(metadata, "primary_action", "membership"),
+        "payg_enabled": metadata_bool(metadata, "payg_enabled", False),
+        "payg_suppressed_reason": metadata_string(metadata, "payg_suppressed_reason"),
+        "insufficient_reason_text": metadata_string(metadata, "insufficient_reason_text"),
+        "available_points": copy["available_points"],
+        "available_points_text": copy["available_points_text"],
+        "membership_offer": membership_offer,
+        "pending_run": dataclasses.asdict(pending_run),
+        "display_guidance": build_payment_display_guidance(copy),
+        "backend_metadata": metadata,
+    }
 
 
 class AuthorizationPending(RuntimeError):
@@ -1776,11 +1973,16 @@ def unwrap_base_response(raw: bytes) -> dict[str, t.Any]:
         raise RuntimeError("unexpected response shape")
     code = int(payload.get("code", 0))
     if code != SUCCESS_CODE:
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = payload.get("meta_data")
+        if not isinstance(metadata, dict):
+            metadata = {}
         raise PagepopAPIError(
             code=code,
             message=str(payload.get("message", "")).strip(),
             reason=str(payload.get("reason", "")).strip(),
-            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            metadata=metadata,
             data=payload.get("data"),
         )
     data = payload.get("data")
@@ -1859,23 +2061,49 @@ def auth_headers(access_key: str, skill_id: str) -> dict[str, str]:
     }
 
 
+def skill_context_headers(config: Config) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    region = config.region.strip()
+    if region:
+        headers["X-Pagepop-User-Region"] = region
+    api_base_url = config.api_base_url.strip()
+    if api_base_url:
+        headers["X-Pagepop-Skill-Api-Base"] = api_base_url
+    return headers
+
+
+def skill_context_meta(config: Config) -> dict[str, str]:
+    meta: dict[str, str] = {}
+    region = config.region.strip()
+    if region:
+        meta["skill_region"] = region
+    api_base_url = config.api_base_url.strip()
+    if api_base_url:
+        meta["skill_api_base_url"] = api_base_url
+    return meta
+
+
 def request_auth_headers(config: Config, state: SkillState) -> dict[str, str]:
     login_token = load_login_token(config)
     if login_token:
-        return {
+        headers = {
             "token": login_token,
             "X-Pagepop-Client": DEFAULT_CLIENT_NAME,
             "Accept": "application/json",
         }
-    if not state.access_key:
-        raise RuntimeError("access key is missing")
-    return auth_headers(state.access_key, config.skill_id)
+    else:
+        if not state.access_key:
+            raise RuntimeError("access key is missing")
+        headers = auth_headers(state.access_key, config.skill_id)
+    headers.update(skill_context_headers(config))
+    return headers
 
 
 def init_auth(config: Config) -> dict[str, t.Any]:
     return http_json(
         "POST",
         f"{config.api_base_url}/v1/openclaw/auth/init",
+        headers=skill_context_headers(config),
         payload={
             "skill_id": config.skill_id,
             "client_name": config.client_name,
@@ -2012,6 +2240,7 @@ def submit_chat(
         },
         "version": config.version,
     }
+    payload["meta"].update(skill_context_meta(config))
     if config.timezone:
         payload["timezone"] = config.timezone
     return http_json(
@@ -2544,6 +2773,11 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
             if auth_attempt == 0 and exc.should_reset_access_key():
                 _reset_access_key_and_emit(config, state, exc)
                 continue
+            if is_membership_paywall_error(exc):
+                state.pending_run = pending_run
+                save_state(config.state_path, state)
+                emit_event("payment_required", **build_payment_required_event(exc, pending_run))
+                return 0
             raise
     raise RuntimeError("failed to finish stream after reauthorization")
 
