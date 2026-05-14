@@ -204,39 +204,6 @@ class PagepopSkillTests(unittest.TestCase):
             "http://127.0.0.1:11073/openclaw/authorize-v2?session=oas-test",
         )
 
-    def test_auth_required_emits_region_warning_when_region_context_is_missing(self) -> None:
-        config = client.Config(
-            api_base_url="https://pc-api.pagepop.ai",
-            skill_id="pagepop-skill",
-            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
-            source_app="feishu",
-            display_app_name="Feishu",
-            region_context_missing=True,
-        )
-        state = client.SkillState()
-
-        with mock.patch.object(
-            client,
-            "init_auth",
-            return_value={
-                "auth_session_id": "oas-test",
-                "authorize_url": "https://www.pagepop.ai/openclaw/authorize?session=oas-test",
-                "expires_at": "2026-04-20T18:00:00Z",
-                "poll_interval_seconds": 1,
-            },
-        ), mock.patch.object(client, "save_state"), mock.patch.object(client, "emit_event") as emit_event:
-            with self.assertRaises(client.AuthorizationPending):
-                client.ensure_authorized(config, state)
-
-        integration_warning_call = emit_event.call_args_list[0]
-        self.assertEqual(integration_warning_call.args[0], "integration_warning")
-        self.assertEqual(integration_warning_call.kwargs["title"], "Region context missing")
-        self.assertIn("mainland China", integration_warning_call.kwargs["message"])
-        self.assertEqual(integration_warning_call.kwargs["current_api_base_url"], "https://pc-api.pagepop.ai")
-
-        auth_required_call = emit_event.call_args_list[1]
-        self.assertEqual(auth_required_call.args[0], "auth_required")
-
     def test_auth_required_emits_integration_warning_for_default_launch_context(self) -> None:
         config = client.Config(
             api_base_url="https://pc-api.pagepop.cn",
@@ -431,7 +398,96 @@ class PagepopSkillTests(unittest.TestCase):
             with mock.patch.object(client, "skill_root_dir", return_value=pathlib.Path(temp_dir)), mock.patch.object(
                 client, "run_auth_command", side_effect=client.AuthorizationPending("wait")
             ):
-                self.assertEqual(client.main(["auth"]), 0)
+                self.assertEqual(client.main(["--region", "CN", "auth"]), 0)
+
+    def test_main_requires_region_for_auth_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_path = pathlib.Path(temp_dir) / "skill-manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "skill_id": "pagepop-skill",
+                        "package_version": "2099.01.01-r1",
+                        "channel": "prod",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with mock.patch.object(client, "skill_root_dir", return_value=pathlib.Path(temp_dir)), mock.patch.object(
+                client, "run_auth_command", return_value=0
+            ), mock.patch("sys.stdout", stdout):
+                self.assertEqual(client.main(["auth"]), 1)
+
+        records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(records[0]["kind"], "host_configuration_error")
+        self.assertEqual(records[0]["code"], "PAGEPOP_SKILL_REGION_REQUIRED")
+        self.assertIn("CN or GLOBAL", records[0]["message"])
+
+    def test_main_rejects_invalid_region_for_stream_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_path = pathlib.Path(temp_dir) / "skill-manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "skill_id": "pagepop-skill",
+                        "package_version": "2099.01.01-r1",
+                        "channel": "prod",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with mock.patch.object(client, "skill_root_dir", return_value=pathlib.Path(temp_dir)), mock.patch.object(
+                client, "run_stream_command", return_value=0
+            ), mock.patch("sys.stdout", stdout):
+                self.assertEqual(client.main(["--region", "US", "stream", "--goal", "hello"]), 1)
+
+        records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(records[0]["kind"], "host_configuration_error")
+        self.assertEqual(records[0]["code"], "PAGEPOP_SKILL_REGION_INVALID")
+        self.assertEqual(records[0]["current_region"], "US")
+
+    def test_main_requires_region_for_resume_stream_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_path = pathlib.Path(temp_dir) / "skill-manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "skill_id": "pagepop-skill",
+                        "package_version": "2099.01.01-r1",
+                        "channel": "prod",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with mock.patch.object(client, "skill_root_dir", return_value=pathlib.Path(temp_dir)), mock.patch.object(
+                client, "run_resume_stream_command", return_value=0
+            ), mock.patch("sys.stdout", stdout):
+                self.assertEqual(client.main(["resume-stream", "--conversation-id", "conv-1"]), 1)
+
+        records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(records[0]["kind"], "host_configuration_error")
+        self.assertEqual(records[0]["code"], "PAGEPOP_SKILL_REGION_REQUIRED")
+
+    def test_main_does_not_require_region_for_status_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_path = pathlib.Path(temp_dir) / "skill-manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "skill_id": "pagepop-skill",
+                        "package_version": "2099.01.01-r1",
+                        "channel": "prod",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(client, "skill_root_dir", return_value=pathlib.Path(temp_dir)), mock.patch.object(
+                client, "run_status_command", return_value=0
+            ):
+                self.assertEqual(client.main(["status"]), 0)
 
     def test_access_key_reset_emits_user_friendly_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1062,30 +1118,51 @@ class PagepopSkillTests(unittest.TestCase):
             "http://127.0.0.1:11073/project?cid=conv-1",
         )
 
-    def test_resolve_api_base_url_uses_region_for_production_domains(self) -> None:
+    def test_resolve_api_base_url_uses_cn_global_region_for_production_domains(self) -> None:
         self.assertEqual(
             client.resolve_api_base_url("", region="CN", timezone=""),
             "https://pc-api.pagepop.cn",
         )
         self.assertEqual(
-            client.resolve_api_base_url("", region="US", timezone=""),
+            client.resolve_api_base_url("", region="GLOBAL", timezone=""),
             "https://pc-api.pagepop.ai",
         )
         self.assertEqual(
-            client.resolve_api_base_url("", region="", timezone="Asia/Shanghai"),
-            "https://pc-api.pagepop.cn",
+            client.resolve_api_base_url("https://custom.example.test/", region="CN", timezone=""),
+            "https://custom.example.test",
         )
+
+    def test_timezone_does_not_replace_required_region(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_path = pathlib.Path(temp_dir) / "skill-manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "skill_id": "pagepop-skill",
+                        "package_version": "2099.01.01-r1",
+                        "channel": "prod",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with mock.patch.object(client, "skill_root_dir", return_value=pathlib.Path(temp_dir)), mock.patch.object(
+                client, "run_auth_command", return_value=0
+            ), mock.patch("sys.stdout", stdout):
+                self.assertEqual(client.main(["--timezone", "Asia/Shanghai", "auth"]), 1)
+
+        records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(records[0]["kind"], "host_configuration_error")
+        self.assertEqual(records[0]["code"], "PAGEPOP_SKILL_REGION_REQUIRED")
+
+    def test_resolve_api_base_url_keeps_legacy_global_fallback_for_local_commands(self) -> None:
         self.assertEqual(
-            client.resolve_api_base_url("", region="", timezone="America/Los_Angeles"),
+            client.resolve_api_base_url("", region="", timezone="Asia/Shanghai"),
             "https://pc-api.pagepop.ai",
         )
         self.assertEqual(
             client.resolve_api_base_url("", region="", timezone=""),
             "https://pc-api.pagepop.ai",
-        )
-        self.assertEqual(
-            client.resolve_api_base_url("https://custom.example.test/", region="US", timezone=""),
-            "https://custom.example.test",
         )
 
     def test_build_artifact_delivery_uses_generic_presentation_shape(self) -> None:

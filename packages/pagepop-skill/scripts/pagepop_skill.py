@@ -22,6 +22,8 @@ import uuid
 MAINLAND_CHINA_API_BASE_URL = "https://pc-api.pagepop.cn"
 GLOBAL_API_BASE_URL = "https://pc-api.pagepop.ai"
 DEFAULT_API_BASE_URL = GLOBAL_API_BASE_URL
+ALLOWED_SKILL_REGIONS = ("CN", "GLOBAL")
+REGION_REQUIRED_COMMANDS = {"auth", "stream", "resume-stream"}
 DEFAULT_SKILL_ID = "pagepop-skill"
 DEFAULT_CLIENT_NAME = "openclaw"
 DEFAULT_CLIENT_VERSION = "1.0.0"
@@ -41,38 +43,6 @@ IMAGE_DOWNLOAD_USER_AGENT = (
 )
 HEARTBEAT_PROGRESS_INTERVAL_SECONDS = 15
 URL_TEXT_RE = re.compile(r"https?://[^\s<>()\"']+")
-MAINLAND_CHINA_REGION_VALUES = {
-    "cn",
-    "chn",
-    "china",
-    "china-mainland",
-    "cn-mainland",
-    "mainland",
-    "mainland-china",
-    "mainland-cn",
-    "prc",
-    "zh-cn",
-    "zh-hans-cn",
-}
-GLOBAL_REGION_VALUES = {
-    "global",
-    "intl",
-    "international",
-    "non-cn",
-    "non-mainland",
-    "outside-cn",
-    "outside-mainland",
-    "overseas",
-    "world",
-}
-MAINLAND_CHINA_TIMEZONES = {
-    "Asia/Beijing",
-    "Asia/Shanghai",
-    "Asia/Chongqing",
-    "Asia/Harbin",
-    "Asia/Urumqi",
-}
-
 SUCCESS_CODE = 1000
 STATE_FILE_NAME = "state.json"
 MANIFEST_FILE_NAME = "skill-manifest.json"
@@ -326,6 +296,24 @@ def build_payment_required_event(exc: PagepopAPIError, pending_run: PendingRun) 
 
 class AuthorizationPending(RuntimeError):
     pass
+
+
+class HostConfigurationError(RuntimeError):
+    def __init__(self, *, code: str, message: str, current_region: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.current_region = current_region
+
+    def to_record(self) -> dict[str, t.Any]:
+        return {
+            "kind": "host_configuration_error",
+            "code": self.code,
+            "message": self.message,
+            "current_region": self.current_region,
+            "allowed_regions": list(ALLOWED_SKILL_REGIONS),
+            "required_for_commands": sorted(REGION_REQUIRED_COMMANDS),
+        }
 
 
 class PagepopHTTPError(RuntimeError):
@@ -744,29 +732,34 @@ def normalize_sse_offset(value: t.Any) -> int:
 
 
 def normalize_user_region(value: str) -> str:
-    normalized = value.strip().lower().replace("_", "-")
+    normalized = value.strip().upper()
     if not normalized:
         return ""
-    if normalized in MAINLAND_CHINA_REGION_VALUES:
-        return "CN"
-    if normalized in GLOBAL_REGION_VALUES:
-        return "GLOBAL"
-    if len(normalized) == 2 and normalized.isalpha():
-        return normalized.upper()
-    return normalized
+    if normalized in ALLOWED_SKILL_REGIONS:
+        return normalized
+    return ""
 
 
-def infer_user_region_from_timezone(timezone: str) -> str:
-    timezone = timezone.strip()
-    if not timezone:
-        return ""
-    if timezone in MAINLAND_CHINA_TIMEZONES:
-        return "CN"
-    return "GLOBAL"
+def require_user_region(region: str, *, command: str) -> str:
+    raw_region = region.strip()
+    if not raw_region:
+        raise HostConfigurationError(
+            code="PAGEPOP_SKILL_REGION_REQUIRED",
+            message=f"PAGEPOP_SKILL_REGION is required for {command}. Expected CN or GLOBAL.",
+        )
+    resolved_region = normalize_user_region(raw_region)
+    if not resolved_region:
+        raise HostConfigurationError(
+            code="PAGEPOP_SKILL_REGION_INVALID",
+            message="PAGEPOP_SKILL_REGION must be CN or GLOBAL.",
+            current_region=raw_region,
+        )
+    return resolved_region
 
 
-def resolve_user_region(region: str, timezone: str) -> str:
-    return normalize_user_region(region) or infer_user_region_from_timezone(timezone)
+def resolve_user_region(region: str, timezone: str = "") -> str:
+    _ = timezone
+    return normalize_user_region(region)
 
 
 def resolve_api_base_url(explicit_api_base_url: str, *, region: str, timezone: str) -> str:
@@ -1749,27 +1742,6 @@ def build_launch_context_warning(config: Config) -> dict[str, t.Any]:
     }
 
 
-def should_warn_missing_region_context(config: Config) -> bool:
-    return config.region_context_missing
-
-
-def build_region_context_warning(config: Config) -> dict[str, t.Any]:
-    return {
-        "title": "Region context missing",
-        "message": (
-            "The host should determine whether the current user is in mainland China "
-            "before invoking this skill. Pass PAGEPOP_SKILL_REGION=CN for mainland China; "
-            "pass another country/region code or GLOBAL for non-mainland users. "
-            "Without region context, PagePop uses the global .ai production domain."
-        ),
-        "action_text": "Pass user region",
-        "result_hint": "Set PAGEPOP_SKILL_REGION from the host's user, tenant, locale, or deployment context.",
-        "current_region": config.region,
-        "current_api_base_url": config.api_base_url,
-        "default_api_base_url": DEFAULT_API_BASE_URL,
-    }
-
-
 def is_source_install(config: Config) -> bool:
     return config.package_version == SOURCE_INSTALL_PACKAGE_VERSION
 
@@ -1872,7 +1844,12 @@ def build_config(args: argparse.Namespace) -> Config:
         )
     ).strip()
     explicit_api_base_url = args.api_base_url or env_value("PAGEPOP_API_BASE_URL", "PAGEPOP_OPENCLAW_API_BASE_URL")
-    resolved_region = resolve_user_region(region, timezone)
+    if args.command in REGION_REQUIRED_COMMANDS:
+        resolved_region = require_user_region(region, command=args.command)
+    elif region:
+        resolved_region = require_user_region(region, command=args.command)
+    else:
+        resolved_region = ""
     api_base_url = resolve_api_base_url(explicit_api_base_url, region=region, timezone=timezone)
     source_app = (args.source_app or env_value("PAGEPOP_SKILL_SOURCE_APP", "PAGEPOP_OPENCLAW_SOURCE_APP")).strip()
     display_app_name = (
@@ -1903,7 +1880,7 @@ def build_config(args: argparse.Namespace) -> Config:
         skill_id=(args.skill_id or manifest.skill_id).strip() or manifest.skill_id,
         state_path=state_dir / STATE_FILE_NAME,
         region=resolved_region,
-        region_context_missing=not explicit_api_base_url.strip() and not resolved_region,
+        region_context_missing=False,
         package_version=manifest.package_version,
         update_channel=update_channel,
         update_repo=manifest.repo,
@@ -2310,8 +2287,6 @@ def ensure_authorized(config: Config, state: SkillState) -> SkillState:
 
     if should_warn_default_launch_context(config):
         emit_event("integration_warning", **build_launch_context_warning(config))
-    if should_warn_missing_region_context(config):
-        emit_event("integration_warning", **build_region_context_warning(config))
 
     init_data = init_auth(config)
     auth_session_id = str(init_data.get("auth_session_id", "")).strip()
@@ -2939,12 +2914,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timezone",
         default="",
-        help="Optional IANA timezone, for example Asia/Shanghai",
+        help="Optional IANA timezone passed through host context; it does not replace --region",
     )
     parser.add_argument(
         "--region",
         default="",
-        help="Optional user region or country code; mainland China uses pagepop.cn, other regions use pagepop.ai",
+        help="Required for auth/stream/resume-stream; allowed values are CN and GLOBAL",
     )
     parser.add_argument(
         "--client-version",
@@ -3044,8 +3019,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: t.Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = build_config(args)
     try:
+        config = build_config(args)
         if args.command == "auth":
             return run_auth_command(config)
         if args.command == "status":
@@ -3059,6 +3034,9 @@ def main(argv: t.Optional[list[str]] = None) -> int:
         if args.command == "resume-stream":
             return run_resume_stream_command(config, args)
         raise RuntimeError(f"unsupported command: {args.command}")
+    except HostConfigurationError as exc:
+        emit_record(exc.to_record())
+        return 1
     except PagepopAPIError as exc:
         emit_record(exc.to_record())
         return 1

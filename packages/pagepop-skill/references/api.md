@@ -2,7 +2,7 @@
 
 ## Default Configuration
 
-- API Base URL: region-based production default. Mainland China uses `https://pc-api.pagepop.cn`; non-mainland users use `https://pc-api.pagepop.ai`. Missing region data defaults to `https://pc-api.pagepop.ai`. `PAGEPOP_API_BASE_URL` or `--api-base-url` overrides this selection.
+- API Base URL: region-based production default. `PAGEPOP_SKILL_REGION=CN` uses `https://pc-api.pagepop.cn`; `PAGEPOP_SKILL_REGION=GLOBAL` uses `https://pc-api.pagepop.ai`. `auth`, `stream`, and `resume-stream` require `PAGEPOP_SKILL_REGION` or `--region` with one of those two values. Missing or invalid region data is a host configuration error. `PAGEPOP_API_BASE_URL` or `--api-base-url` overrides the URL selection, but the region is still required so host context can be sent to PagePop.
 - Skill ID: `pagepop-skill`
 - Client Name: `openclaw`
 - Client Version: `1.0.0`
