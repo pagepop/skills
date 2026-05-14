@@ -54,7 +54,7 @@ Common environment variables:
 
 The legacy `PAGEPOP_OPENCLAW_*` names are still accepted as compatibility aliases for existing OpenClaw installations. New integrations should use the `PAGEPOP_SKILL_*` names. Host-specific usage notes belong in `adapters/`.
 
-Before invoking this skill, host applications should determine whether the current user is in mainland China or outside mainland China. If `PAGEPOP_API_BASE_URL` is not set, production domain selection is region-based: mainland China (`PAGEPOP_SKILL_REGION=CN` or an Asia/Shanghai-style mainland timezone) uses `https://pc-api.pagepop.cn`; non-mainland users use `https://pc-api.pagepop.ai`. Missing region data defaults to the global `.ai` domain and emits an `integration_warning`.
+Before invoking `auth`, `stream`, or `resume-stream`, host applications must determine whether the current user belongs to the mainland China or global PagePop site and pass `PAGEPOP_SKILL_REGION` or `--region`. Allowed values are `CN` and `GLOBAL`. Missing or invalid region context is a host configuration error; the skill must not guess from timezone or silently default to another site.
 
 ## Host Integration
 
@@ -64,7 +64,7 @@ When a host invokes this skill on behalf of another app, it should pass launch c
 - `display_app_name`
 - `return_mode`
 - `return_target`
-- `region` or `PAGEPOP_SKILL_REGION`, after deciding mainland China vs non-mainland
+- `region` or `PAGEPOP_SKILL_REGION`, after deciding `CN` vs `GLOBAL`
 
 If no launch context is provided, the authorization page falls back to the default host label.
 
@@ -97,4 +97,16 @@ The skill emits JSON Lines. Important event kinds include:
 - `stream_finished`
 - `skill_update_available`
 - `skill_update_required`
+- `payment_required`
 - `error`
+
+## Payment Required Events
+
+When the skill emits `payment_required`, treat it as a structured control event, not as user-facing copy.
+
+- Explain the issue in the user's language. If the request is Chinese, use "积分" and never "点数".
+- Do not show machine fields such as `payment_required`, `payment_offer_required`, `openclaw_reason`, `reason`, `paywall_mode`, `primary_action`, or raw backend reason strings.
+- Prefer `title`, `message`, `action_text`, `result_hint`, `status_text`, `reason_text`, and `membership_offer.url` for display.
+- When `paywall_mode=membership_only`, lead with the membership action and do not offer PAYG or credits-pack options.
+- Tell the user the current request has been saved and can be continued after membership is activated.
+- If `display_guidance` is present, follow it over raw backend metadata.

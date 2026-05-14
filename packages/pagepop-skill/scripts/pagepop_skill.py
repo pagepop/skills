@@ -22,6 +22,8 @@ import uuid
 MAINLAND_CHINA_API_BASE_URL = "https://pc-api.pagepop.cn"
 GLOBAL_API_BASE_URL = "https://pc-api.pagepop.ai"
 DEFAULT_API_BASE_URL = GLOBAL_API_BASE_URL
+ALLOWED_SKILL_REGIONS = ("CN", "GLOBAL")
+REGION_REQUIRED_COMMANDS = {"auth", "stream", "resume-stream"}
 DEFAULT_SKILL_ID = "pagepop-skill"
 DEFAULT_CLIENT_NAME = "openclaw"
 DEFAULT_CLIENT_VERSION = "1.0.0"
@@ -41,38 +43,6 @@ IMAGE_DOWNLOAD_USER_AGENT = (
 )
 HEARTBEAT_PROGRESS_INTERVAL_SECONDS = 15
 URL_TEXT_RE = re.compile(r"https?://[^\s<>()\"']+")
-MAINLAND_CHINA_REGION_VALUES = {
-    "cn",
-    "chn",
-    "china",
-    "china-mainland",
-    "cn-mainland",
-    "mainland",
-    "mainland-china",
-    "mainland-cn",
-    "prc",
-    "zh-cn",
-    "zh-hans-cn",
-}
-GLOBAL_REGION_VALUES = {
-    "global",
-    "intl",
-    "international",
-    "non-cn",
-    "non-mainland",
-    "outside-cn",
-    "outside-mainland",
-    "overseas",
-    "world",
-}
-MAINLAND_CHINA_TIMEZONES = {
-    "Asia/Beijing",
-    "Asia/Shanghai",
-    "Asia/Chongqing",
-    "Asia/Harbin",
-    "Asia/Urumqi",
-}
-
 SUCCESS_CODE = 1000
 STATE_FILE_NAME = "state.json"
 MANIFEST_FILE_NAME = "skill-manifest.json"
@@ -87,6 +57,8 @@ KEY_RESET_REASONS = {
     "SKILL_KEY_EXPIRED",
     "MEMBERSHIP_REQUIRED",
 }
+PAYMENT_OFFER_REQUIRED_REASON = "payment_offer_required"
+PAYWALL_MODE_MEMBERSHIP_ONLY = "membership_only"
 
 TERMINAL_CONTROL_COMMANDS = {"done", "error", "manual_retry", "cancled"}
 
@@ -127,8 +99,221 @@ class PagepopAPIError(RuntimeError):
         }
 
 
+def metadata_string(metadata: dict[str, t.Any], key: str, default: str = "") -> str:
+    value = metadata.get(key)
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def metadata_bool(metadata: dict[str, t.Any], key: str, default: bool = False) -> bool:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def metadata_int(metadata: dict[str, t.Any], key: str, default: int = 0) -> int:
+    value = metadata.get(key)
+    if value is None:
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_membership_offer(raw: t.Any) -> dict[str, t.Any]:
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        raw = parsed
+    if not isinstance(raw, dict):
+        return {}
+    offer = dict(raw)
+    for key in ("url", "action_text", "title", "message", "source"):
+        if key in offer and offer[key] is not None:
+            offer[key] = str(offer[key]).strip()
+    return offer
+
+
+def is_membership_paywall_error(exc: PagepopAPIError) -> bool:
+    if exc.openclaw_reason != PAYMENT_OFFER_REQUIRED_REASON:
+        return False
+    paywall_mode = metadata_string(exc.metadata, "paywall_mode", PAYWALL_MODE_MEMBERSHIP_ONLY)
+    return paywall_mode == PAYWALL_MODE_MEMBERSHIP_ONLY
+
+
+def contains_cjk(value: str) -> bool:
+    return any(
+        "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+        for char in value
+    )
+
+
+def clean_backend_display_text(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    blocked_fragments = (
+        "spendable points",
+        "payment_required",
+        "payment_offer_required",
+    )
+    lowered = value.lower()
+    if any(fragment in lowered for fragment in blocked_fragments):
+        return ""
+    return value
+
+
+def membership_paywall_display_copy(
+    exc: PagepopAPIError,
+    pending_run: PendingRun,
+    metadata: dict[str, t.Any],
+    membership_offer: dict[str, t.Any],
+) -> dict[str, t.Any]:
+    available_points = metadata_int(metadata, "available_points", 0)
+    chinese = contains_cjk(pending_run.goal)
+    if chinese:
+        return {
+            "preferred_language": "zh-CN",
+            "status_text": "需要开通会员",
+            "reason_text": "可用积分不足",
+            "title": "PagePop 可用积分不足",
+            "message": (
+                f"当前账号可用积分为 {available_points}，暂时无法继续生成。"
+                "请开通 PagePop 会员后，回到当前 Agent 继续本次请求，无需重新输入 prompt。"
+            ),
+            "action_text": "开通 PagePop 会员",
+            "result_hint": "开通会员后，回到当前 Agent 继续本次请求，无需重新输入 prompt。",
+            "available_points_text": f"可用积分：{available_points}",
+            "available_points": available_points,
+        }
+
+    title = first_non_empty(
+        clean_backend_display_text(metadata_string(metadata, "title_text")),
+        clean_backend_display_text(str(membership_offer.get("title", "")).strip()),
+        "PagePop credits required",
+    )
+    message = first_non_empty(
+        clean_backend_display_text(metadata_string(metadata, "message_text")),
+        clean_backend_display_text(str(membership_offer.get("message", "")).strip()),
+        clean_backend_display_text(exc.message),
+        "Your available PagePop credits are insufficient. Activate membership to continue this agent run.",
+    )
+    action_text = first_non_empty(
+        clean_backend_display_text(metadata_string(metadata, "action_text")),
+        clean_backend_display_text(str(membership_offer.get("action_text", "")).strip()),
+        "Open PagePop membership",
+    )
+    result_hint = first_non_empty(
+        clean_backend_display_text(metadata_string(metadata, "result_hint_text")),
+        "After activating membership, return to the agent and continue this request without re-entering the prompt.",
+    )
+    return {
+        "preferred_language": "en",
+        "status_text": "Membership required",
+        "reason_text": "Insufficient credits",
+        "title": title,
+        "message": message,
+        "action_text": action_text,
+        "result_hint": result_hint,
+        "available_points_text": first_non_empty(
+            clean_backend_display_text(metadata_string(metadata, "available_points_text")),
+            f"Available credits: {available_points}",
+        ),
+        "available_points": available_points,
+    }
+
+
+def build_payment_display_guidance(copy: dict[str, t.Any]) -> dict[str, t.Any]:
+    return {
+        "preferred_language": copy["preferred_language"],
+        "lead_with": "membership",
+        "continue_pending_run": True,
+        "do_not_offer_payg": True,
+        "do_not_display_fields": [
+            "payment_required",
+            "payment_offer_required",
+            "openclaw_reason",
+            "reason",
+            "paywall_mode",
+            "primary_action",
+            "backend_message",
+            "backend_metadata",
+        ],
+        "terminology": {
+            "zh-CN": {"credits": "积分", "avoid": ["点数"]},
+            "en": {"credits": "credits", "avoid": ["spendable points"]},
+        },
+    }
+
+
+def build_payment_required_event(exc: PagepopAPIError, pending_run: PendingRun) -> dict[str, t.Any]:
+    metadata = exc.metadata or {}
+    membership_offer = parse_membership_offer(metadata.get("membership_offer"))
+    copy = membership_paywall_display_copy(exc, pending_run, metadata, membership_offer)
+    membership_offer["action_text"] = copy["action_text"]
+    membership_offer["title"] = copy["title"]
+    membership_offer["message"] = copy["message"]
+
+    return {
+        "reason": exc.openclaw_reason or exc.reason,
+        "code": exc.code,
+        "status_text": copy["status_text"],
+        "reason_text": copy["reason_text"],
+        "message": copy["message"],
+        "backend_message": exc.message,
+        "title": copy["title"],
+        "action_text": copy["action_text"],
+        "result_hint": copy["result_hint"],
+        "requires_user_action": True,
+        "pause_execution": True,
+        "resume_mode": "continue_pending_run",
+        "paywall_version": metadata_string(metadata, "paywall_version", "1"),
+        "paywall_mode": metadata_string(metadata, "paywall_mode", PAYWALL_MODE_MEMBERSHIP_ONLY),
+        "primary_action": metadata_string(metadata, "primary_action", "membership"),
+        "payg_enabled": metadata_bool(metadata, "payg_enabled", False),
+        "payg_suppressed_reason": metadata_string(metadata, "payg_suppressed_reason"),
+        "insufficient_reason_text": metadata_string(metadata, "insufficient_reason_text"),
+        "available_points": copy["available_points"],
+        "available_points_text": copy["available_points_text"],
+        "membership_offer": membership_offer,
+        "pending_run": dataclasses.asdict(pending_run),
+        "display_guidance": build_payment_display_guidance(copy),
+        "backend_metadata": metadata,
+    }
+
+
 class AuthorizationPending(RuntimeError):
     pass
+
+
+class HostConfigurationError(RuntimeError):
+    def __init__(self, *, code: str, message: str, current_region: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.current_region = current_region
+
+    def to_record(self) -> dict[str, t.Any]:
+        return {
+            "kind": "host_configuration_error",
+            "code": self.code,
+            "message": self.message,
+            "current_region": self.current_region,
+            "allowed_regions": list(ALLOWED_SKILL_REGIONS),
+            "required_for_commands": sorted(REGION_REQUIRED_COMMANDS),
+        }
 
 
 class PagepopHTTPError(RuntimeError):
@@ -547,29 +732,34 @@ def normalize_sse_offset(value: t.Any) -> int:
 
 
 def normalize_user_region(value: str) -> str:
-    normalized = value.strip().lower().replace("_", "-")
+    normalized = value.strip().upper()
     if not normalized:
         return ""
-    if normalized in MAINLAND_CHINA_REGION_VALUES:
-        return "CN"
-    if normalized in GLOBAL_REGION_VALUES:
-        return "GLOBAL"
-    if len(normalized) == 2 and normalized.isalpha():
-        return normalized.upper()
-    return normalized
+    if normalized in ALLOWED_SKILL_REGIONS:
+        return normalized
+    return ""
 
 
-def infer_user_region_from_timezone(timezone: str) -> str:
-    timezone = timezone.strip()
-    if not timezone:
-        return ""
-    if timezone in MAINLAND_CHINA_TIMEZONES:
-        return "CN"
-    return "GLOBAL"
+def require_user_region(region: str, *, command: str) -> str:
+    raw_region = region.strip()
+    if not raw_region:
+        raise HostConfigurationError(
+            code="PAGEPOP_SKILL_REGION_REQUIRED",
+            message=f"PAGEPOP_SKILL_REGION is required for {command}. Expected CN or GLOBAL.",
+        )
+    resolved_region = normalize_user_region(raw_region)
+    if not resolved_region:
+        raise HostConfigurationError(
+            code="PAGEPOP_SKILL_REGION_INVALID",
+            message="PAGEPOP_SKILL_REGION must be CN or GLOBAL.",
+            current_region=raw_region,
+        )
+    return resolved_region
 
 
-def resolve_user_region(region: str, timezone: str) -> str:
-    return normalize_user_region(region) or infer_user_region_from_timezone(timezone)
+def resolve_user_region(region: str, timezone: str = "") -> str:
+    _ = timezone
+    return normalize_user_region(region)
 
 
 def resolve_api_base_url(explicit_api_base_url: str, *, region: str, timezone: str) -> str:
@@ -1552,27 +1742,6 @@ def build_launch_context_warning(config: Config) -> dict[str, t.Any]:
     }
 
 
-def should_warn_missing_region_context(config: Config) -> bool:
-    return config.region_context_missing
-
-
-def build_region_context_warning(config: Config) -> dict[str, t.Any]:
-    return {
-        "title": "Region context missing",
-        "message": (
-            "The host should determine whether the current user is in mainland China "
-            "before invoking this skill. Pass PAGEPOP_SKILL_REGION=CN for mainland China; "
-            "pass another country/region code or GLOBAL for non-mainland users. "
-            "Without region context, PagePop uses the global .ai production domain."
-        ),
-        "action_text": "Pass user region",
-        "result_hint": "Set PAGEPOP_SKILL_REGION from the host's user, tenant, locale, or deployment context.",
-        "current_region": config.region,
-        "current_api_base_url": config.api_base_url,
-        "default_api_base_url": DEFAULT_API_BASE_URL,
-    }
-
-
 def is_source_install(config: Config) -> bool:
     return config.package_version == SOURCE_INSTALL_PACKAGE_VERSION
 
@@ -1675,7 +1844,12 @@ def build_config(args: argparse.Namespace) -> Config:
         )
     ).strip()
     explicit_api_base_url = args.api_base_url or env_value("PAGEPOP_API_BASE_URL", "PAGEPOP_OPENCLAW_API_BASE_URL")
-    resolved_region = resolve_user_region(region, timezone)
+    if args.command in REGION_REQUIRED_COMMANDS:
+        resolved_region = require_user_region(region, command=args.command)
+    elif region:
+        resolved_region = require_user_region(region, command=args.command)
+    else:
+        resolved_region = ""
     api_base_url = resolve_api_base_url(explicit_api_base_url, region=region, timezone=timezone)
     source_app = (args.source_app or env_value("PAGEPOP_SKILL_SOURCE_APP", "PAGEPOP_OPENCLAW_SOURCE_APP")).strip()
     display_app_name = (
@@ -1706,7 +1880,7 @@ def build_config(args: argparse.Namespace) -> Config:
         skill_id=(args.skill_id or manifest.skill_id).strip() or manifest.skill_id,
         state_path=state_dir / STATE_FILE_NAME,
         region=resolved_region,
-        region_context_missing=not explicit_api_base_url.strip() and not resolved_region,
+        region_context_missing=False,
         package_version=manifest.package_version,
         update_channel=update_channel,
         update_repo=manifest.repo,
@@ -1776,11 +1950,16 @@ def unwrap_base_response(raw: bytes) -> dict[str, t.Any]:
         raise RuntimeError("unexpected response shape")
     code = int(payload.get("code", 0))
     if code != SUCCESS_CODE:
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = payload.get("meta_data")
+        if not isinstance(metadata, dict):
+            metadata = {}
         raise PagepopAPIError(
             code=code,
             message=str(payload.get("message", "")).strip(),
             reason=str(payload.get("reason", "")).strip(),
-            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            metadata=metadata,
             data=payload.get("data"),
         )
     data = payload.get("data")
@@ -1859,23 +2038,49 @@ def auth_headers(access_key: str, skill_id: str) -> dict[str, str]:
     }
 
 
+def skill_context_headers(config: Config) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    region = config.region.strip()
+    if region:
+        headers["X-Pagepop-User-Region"] = region
+    api_base_url = config.api_base_url.strip()
+    if api_base_url:
+        headers["X-Pagepop-Skill-Api-Base"] = api_base_url
+    return headers
+
+
+def skill_context_meta(config: Config) -> dict[str, str]:
+    meta: dict[str, str] = {}
+    region = config.region.strip()
+    if region:
+        meta["skill_region"] = region
+    api_base_url = config.api_base_url.strip()
+    if api_base_url:
+        meta["skill_api_base_url"] = api_base_url
+    return meta
+
+
 def request_auth_headers(config: Config, state: SkillState) -> dict[str, str]:
     login_token = load_login_token(config)
     if login_token:
-        return {
+        headers = {
             "token": login_token,
             "X-Pagepop-Client": DEFAULT_CLIENT_NAME,
             "Accept": "application/json",
         }
-    if not state.access_key:
-        raise RuntimeError("access key is missing")
-    return auth_headers(state.access_key, config.skill_id)
+    else:
+        if not state.access_key:
+            raise RuntimeError("access key is missing")
+        headers = auth_headers(state.access_key, config.skill_id)
+    headers.update(skill_context_headers(config))
+    return headers
 
 
 def init_auth(config: Config) -> dict[str, t.Any]:
     return http_json(
         "POST",
         f"{config.api_base_url}/v1/openclaw/auth/init",
+        headers=skill_context_headers(config),
         payload={
             "skill_id": config.skill_id,
             "client_name": config.client_name,
@@ -2012,6 +2217,7 @@ def submit_chat(
         },
         "version": config.version,
     }
+    payload["meta"].update(skill_context_meta(config))
     if config.timezone:
         payload["timezone"] = config.timezone
     return http_json(
@@ -2081,8 +2287,6 @@ def ensure_authorized(config: Config, state: SkillState) -> SkillState:
 
     if should_warn_default_launch_context(config):
         emit_event("integration_warning", **build_launch_context_warning(config))
-    if should_warn_missing_region_context(config):
-        emit_event("integration_warning", **build_region_context_warning(config))
 
     init_data = init_auth(config)
     auth_session_id = str(init_data.get("auth_session_id", "")).strip()
@@ -2544,6 +2748,11 @@ def run_stream_command(config: Config, args: argparse.Namespace) -> int:
             if auth_attempt == 0 and exc.should_reset_access_key():
                 _reset_access_key_and_emit(config, state, exc)
                 continue
+            if is_membership_paywall_error(exc):
+                state.pending_run = pending_run
+                save_state(config.state_path, state)
+                emit_event("payment_required", **build_payment_required_event(exc, pending_run))
+                return 0
             raise
     raise RuntimeError("failed to finish stream after reauthorization")
 
@@ -2705,12 +2914,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timezone",
         default="",
-        help="Optional IANA timezone, for example Asia/Shanghai",
+        help="Optional IANA timezone passed through host context; it does not replace --region",
     )
     parser.add_argument(
         "--region",
         default="",
-        help="Optional user region or country code; mainland China uses pagepop.cn, other regions use pagepop.ai",
+        help="Required for auth/stream/resume-stream; allowed values are CN and GLOBAL",
     )
     parser.add_argument(
         "--client-version",
@@ -2810,8 +3019,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: t.Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = build_config(args)
     try:
+        config = build_config(args)
         if args.command == "auth":
             return run_auth_command(config)
         if args.command == "status":
@@ -2825,6 +3034,9 @@ def main(argv: t.Optional[list[str]] = None) -> int:
         if args.command == "resume-stream":
             return run_resume_stream_command(config, args)
         raise RuntimeError(f"unsupported command: {args.command}")
+    except HostConfigurationError as exc:
+        emit_record(exc.to_record())
+        return 1
     except PagepopAPIError as exc:
         emit_record(exc.to_record())
         return 1
