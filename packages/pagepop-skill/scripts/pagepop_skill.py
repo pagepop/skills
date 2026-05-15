@@ -1991,12 +1991,14 @@ def request_auth_headers(config: Config, state: SkillState) -> dict[str, str]:
             "token": login_token,
             "X-Pagepop-Skill-Id": config.skill_id,
             "X-Pagepop-Client": DEFAULT_CLIENT_NAME,
+            "X-Pagepop-Client-Type": str(config.client_type),
             "Accept": "application/json",
             "Accept-Language": accept_language_for_config(config),
         }
     if not state.access_key:
         raise RuntimeError("access key is missing")
     headers = auth_headers(state.access_key, config.skill_id)
+    headers["X-Pagepop-Client-Type"] = str(config.client_type)
     headers["Accept-Language"] = accept_language_for_config(config)
     return headers
 

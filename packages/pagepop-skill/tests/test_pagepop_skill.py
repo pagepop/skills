@@ -1263,6 +1263,19 @@ class PagepopSkillTests(unittest.TestCase):
             self.assertEqual(headers["token"], "pc_token")
             self.assertEqual(headers["X-Pagepop-Skill-Id"], "pagepop-skill")
 
+    def test_request_auth_headers_include_client_type(self) -> None:
+        config = client.Config(
+            api_base_url="https://pc-api.pagepop.cn",
+            skill_id="pagepop-skill",
+            state_path=pathlib.Path("/tmp/pagepop-skill-test-state.json"),
+            client_type=client.MAINLAND_CHINA_CLIENT_TYPE,
+        )
+        state = client.SkillState(access_key="pp_sk_existing")
+
+        headers = client.request_auth_headers(config, state)
+
+        self.assertEqual(headers["X-Pagepop-Client-Type"], str(client.MAINLAND_CHINA_CLIENT_TYPE))
+
     def test_create_quote_posts_selected_offer_payload(self) -> None:
         config = client.Config(
             api_base_url="https://pc-api.pagepop.ai",
